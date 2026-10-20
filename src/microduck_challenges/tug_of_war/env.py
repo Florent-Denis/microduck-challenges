@@ -71,7 +71,7 @@ from .rewards import ArenaFall, Retreat, pit_margin, pit_margin_reward
 LENGTH_M, WIDTH_M, WALL_HEIGHT_M = 4.0, 0.8, 0.15          # arena/events/tug-of-war.toml
 PIT_M, PIT_DEPTH_M, STRING_M = 0.30, 0.30, 1.00
 COMMAND_VX = -0.30
-BOUT_S, SETTLE_S = 20.0, 0.5
+BOUT_S, SETTLE_S = 45.0, 0.5
 JOINT_PERTURBATION_RAD, YAW_PERTURBATION_DEG = 0.01, 2.0
 FALL_GRAVITY_Z, FALL_HOLD_S = -0.5, 0.3                    # [termination]: TRAINING ONLY here (D9)
 WALL_THICKNESS_M, PLATFORM_OVERRUN_M = 0.05, 20.0           # arena/course.py
