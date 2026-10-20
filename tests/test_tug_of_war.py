@@ -1,5 +1,5 @@
 """The Tug of War trains in the Arena's tug: the same course, string, winch, pull, start and command."""
-import subprocess, sys
+import math, subprocess, sys
 from types import SimpleNamespace
 import mujoco, numpy as np, pytest, torch
 from mjlab.envs import ManagerBasedRlEnv
@@ -49,7 +49,6 @@ def test_the_constants_are_the_arenas():
     assert tuple(EVENT.command) == (tug.COMMAND_VX,) + (0.0,) * 12
     assert (tug.TIME_LIMIT_S, tug.SETTLE_S, tug.JOINT_PERTURBATION_RAD, tug.YAW_PERTURBATION_DEG) == (
         EVENT.time_limit_s, s.settle_s, s.joint_rad, s.yaw_deg)
-    assert (tug.FALL_GRAVITY_Z, tug.FALL_HOLD_S) == (EVENT.termination.fall_gravity_z, EVENT.termination.fall_hold_s)
     assert tug.STRING_OFFSET == pytest.approx(arena_course.string_offset("legs"), abs=1e-12)
     assert (tug.SPAWN_HEIGHT_M, tug.WALL_THICKNESS_M, tug.PLATFORM_OVERRUN_M, tug.PIT_DROP_M) == (
         arena_course.SPAWN_HEIGHT_M, arena_course.WALL_THICKNESS_M, arena_course.PLATFORM_OVERRUN_M, arena_tug.PIT_DROP_M)
@@ -130,15 +129,21 @@ def test_training_pulls_around_the_bench():
     assert cfg.hz_scale[0] <= 1.0 <= cfg.hz_scale[1] and cfg.jerk_hz == tug.BENCH_JERK_HZ
 
 
+def _winch_env(model, n):
+    """What WinchCommand reads of an env: its clock and the winch's ctrl."""
+    ctrl = torch.zeros(n, model.nu, dtype=torch.float64)
+    return SimpleNamespace(num_envs=n, device="cpu", step_dt=0.02, episode_length_buf=torch.zeros(n, dtype=torch.long),
+                           sim=SimpleNamespace(mj_model=model, data=SimpleNamespace(ctrl=ctrl)))
+
+
 def test_the_winch_pulls_its_profile_on_the_arenas_clock(training_model):
     n = 64
-    ctrl = torch.zeros(n, training_model.nu, dtype=torch.float64)
-    env = SimpleNamespace(num_envs=n, device="cpu", step_dt=0.02, episode_length_buf=torch.zeros(n, dtype=torch.long),
-                          sim=SimpleNamespace(mj_model=training_model, data=SimpleNamespace(ctrl=ctrl)))
+    env = _winch_env(training_model, n)
+    ctrl = env.sim.data.ctrl
     term = tug.WinchCommandCfg().build(env)
     term.reset(torch.arange(n))
     p = term.profile
-    assert ((p[:, 0] >= 0.125) & (p[:, 0] <= 0.75) & (p[:, 1] >= 0.5) & (p[:, 1] <= 2.0)).all()
+    assert ((p[:, 0] >= 0.125) & (p[:, 0] <= 0.75) & (p[:, 1] >= 0.0) & (p[:, 1] <= 2.0)).all()  # yielding tops from 0
     winch = training_model.actuator(tug.WINCH).id
     for k in (0, 24, 25, 26, 500, 1524):
         env.episode_length_buf[:] = k
@@ -147,6 +152,22 @@ def test_the_winch_pulls_its_profile_on_the_arenas_clock(training_model):
         assert torch.allclose(ctrl[:, winch], expected.to(ctrl.dtype))
         assert torch.allclose(term.command[:, 0], (expected / tug.BENCH_TOP_N).to(term.command.dtype))
     assert not ctrl[:, [i for i in range(training_model.nu) if i != winch]].any()  # servos untouched
+
+
+def test_some_episodes_have_a_yielding_winch(training_model):
+    """A yielding episode's top is one the duck can out-pull, so walking back reels the winch out.
+    The ordinary tops are drawn above the yielding range here, so a top at or under 1.5 N is a yield."""
+    n = 2000
+
+    def tops(yield_prob):
+        term = tug.WinchCommandCfg(yield_prob=yield_prob, top_n=(2.0, 1.25 * tug.BENCH_TOP_N)).build(_winch_env(training_model, n))
+        term.reset(torch.arange(n))
+        return term.profile[:, 1]
+
+    assert (tug.WinchCommandCfg().yield_prob, tug.WinchCommandCfg().yield_top_n) == (0.4, (0.0, 1.5))
+    yielding = tops(0.4) <= 1.5
+    assert yielding.double().mean().item() == pytest.approx(0.4, abs=0.05)
+    assert not (tops(0.0) <= 1.5).any()
 
 
 def test_the_winch_top_widens_stage_by_stage():
@@ -213,35 +234,35 @@ def test_the_winch_top_widens_on_training_iterations(cfg):
     assert [s["step"] for s in stages] == [i * tug.RL_CFG.num_steps_per_env for i in (0, 500, 1000, 1500)]
 
 
-def test_the_pit_and_a_fall_end_an_episode_early(cfg):
-    assert set(cfg.terminations) == {"time_out", "nan_state", "in_pit", "fell"}
+def test_the_pit_alone_ends_an_episode(cfg):
+    """Only the pit decides, as on the Arena: a duck that goes down stays in play and can be dragged in."""
+    assert set(cfg.terminations) == {"time_out", "nan_state", "in_pit"}
     assert cfg.terminations["in_pit"].params["minimum_height"] == -arena_tug.PIT_DROP_M
-    assert cfg.terminations["fell"].func is rewards.ArenaFall
-    assert cfg.terminations["fell"].params == {"fall_gravity_z": EVENT.termination.fall_gravity_z,
-                                               "hold_steps": round(EVENT.termination.fall_hold_s / 0.02)}
     assert cfg.rewards["out"].weight == -50.0
 
 
-def test_a_fall_is_the_arenas_rule(cfg):
-    """Gravity z above fall_gravity_z for the hold's straight control steps, as arena.stage.fell_at counts it."""
-    params = cfg.terminations["fell"].params
-    gravity = torch.tensor([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0]])   # env 0 upright, env 1 on its side
-    env = SimpleNamespace(num_envs=2, device="cpu",
-                          scene={"robot": SimpleNamespace(data=SimpleNamespace(projected_gravity_b=gravity))})
-    term = rewards.ArenaFall(cfg.terminations["fell"], env)
-    seen = [term(env, **params).tolist() for _ in range(params["hold_steps"])]
-    assert seen[-2:] == [[False, False], [False, True]]   # out on the step that completes the hold
-    term.reset(torch.tensor([1]))
-    assert term(env, **params).tolist() == [False, False]
-
-
-def test_hold_pays_the_pull_only_on_its_feet():
-    """The winch's pull while upright and not out; nothing once tipped past the fall rule's line, or out."""
-    gravity = torch.tensor([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])
+def test_hold_pays_the_pull_whatever_the_posture():
+    """The winch's pull while not out, on its feet or on its side; nothing once out."""
+    gravity = torch.tensor([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])   # upright, on its side, upright
     env = SimpleNamespace(scene={"robot": SimpleNamespace(data=SimpleNamespace(projected_gravity_b=gravity))},
                           command_manager=SimpleNamespace(get_command={"winch": torch.full((3, 1), 0.4)}.get),
                           termination_manager=SimpleNamespace(terminated=torch.tensor([False, False, True])))
-    assert rewards.hold(env, tug.FALL_GRAVITY_Z).tolist() == pytest.approx([0.4, 0.0, 0.0])
+    assert rewards.hold(env).tolist() == pytest.approx([0.4, 0.4, 0.0])
+
+
+def test_retreat_pays_backing_away_from_the_pit(cfg):
+    """The string end's x velocity in the world, the trunk's plus its spin about the trunk: backing
+    away (-x) at the scale pays tanh(1), towards the pit nothing; a still trunk leaning back moves it too."""
+    params = cfg.rewards["retreat"].params
+    assert cfg.rewards["retreat"].func is rewards.retreat and cfg.rewards["retreat"].weight == 1.0
+    assert params == {"offset": tug.STRING_OFFSET, "scale": 0.2}
+    lean_back = -0.2 / tug.STRING_OFFSET[2]   # about y: the neck, STRING_OFFSET[2] above the trunk, swings -x at 0.2 m/s
+    data = SimpleNamespace(root_link_pos_w=torch.tensor([[-0.53, 0.0, 0.11]] * 3),
+                           root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 3),
+                           root_link_lin_vel_w=torch.tensor([[-0.2, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.0, 0.0]]),
+                           root_link_ang_vel_w=torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, lean_back, 0.0]]))
+    env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)})
+    assert rewards.retreat(env, **params).tolist() == pytest.approx([math.tanh(1.0), 0.0, math.tanh(1.0)], abs=1e-6)
 
 
 def test_the_string_end_is_where_the_arena_judges_it():

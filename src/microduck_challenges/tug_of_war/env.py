@@ -22,11 +22,16 @@ decisions, each commented where it is made:
   D6  the twist is the event's fixed command, -0.30 m/s backwards, in every env
   D7  the Arena's collision set (the standup robot: a dragged duck touches with its body) and
       solver: implicitfast, 10/20 iterations, 0.005 s x 4
-  D9  the pit and the Arena's fall rule end an episode, with an `out` penalty: a fall loses
-  D10 `hold` pays the pull only while the duck is on its feet and not out
+  D9  only the pit ends an episode, with an `out` penalty, as on the Arena (owner, 2026-10-20):
+      going down to hold is a fair way to hold, the point is to drag the other duck in
+  D10 `hold` pays the pull while the duck is not out, whatever its posture (D9)
   D11 an episode is the settle plus the bench's timed length: the policy lives the whole ramp
   D12 the winch's profiles hold the bench's and pull harder, up to 1.25x its top by curriculum
   D13 the critic alone reads the pull and the pit margin; the actor reads the Arena's 61 numbers
+  D14 the duck is taught to pull, not only to resist: a share of episodes draws a yielding winch
+      it can out-pull, and `retreat` pays the string end backing away from the pit. The first
+      trainings (t1) only resisted: every policy dove face-down under the fall line and held by
+      friction, and in bouts both ducks stood still, the string slack
 """
 
 import math
@@ -63,7 +68,7 @@ from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CF
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
-from .rewards import ArenaFall, hold, pit_margin, pit_margin_reward
+from .rewards import hold, pit_margin, pit_margin_reward, retreat
 
 # Copied from the Arena (the HF job cannot import it); tests/test_tug_of_war.py pins each one.
 LENGTH_M, WIDTH_M, WALL_HEIGHT_M = 4.0, 0.8, 0.15          # arena/events/tug-of-war.toml
@@ -71,7 +76,6 @@ PIT_M, PIT_DEPTH_M, STRING_M = 0.30, 0.30, 1.00
 COMMAND_VX = -0.30
 TIME_LIMIT_S, SETTLE_S = 30.0, 0.5
 JOINT_PERTURBATION_RAD, YAW_PERTURBATION_DEG = 0.01, 2.0
-FALL_GRAVITY_Z, FALL_HOLD_S = -0.5, 0.3                    # [termination]: a fall loses
 BENCH_RAMP_N_PER_S, BENCH_TOP_N, BENCH_JERK_N, BENCH_JERK_HZ = 0.25, 7.0, 0.4, (0.7, 1.9)
 SPAWN_HEIGHT_M, WALL_THICKNESS_M, PLATFORM_OVERRUN_M = 0.12, 0.05, 20.0   # arena/course.py
 STRING_OFFSET = (0.026, 0.0145, 0.0324215)                 # string_offset("legs")
@@ -202,11 +206,15 @@ def bench_force(profile: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
 @dataclass(kw_only=True)
 class WinchCommandCfg(CommandTermCfg):
     """The ranges each episode's profile is drawn from: they hold the bench's ramp, jerks and
-    frequencies, and pull harder, so the policy meets the bench's pull and learns to lose late."""
+    frequencies, and pull harder, so the policy meets the bench's pull and learns to lose late.
+    A share `yield_prob` of the episodes yields instead (D14): its top comes from `yield_top_n`,
+    a pull the duck can out-pull, so walking back reels the winch out and the duck learns to pull."""
 
     resampling_time_range: tuple[float, float] = (1e9, 1e9)   # one profile per episode, drawn at reset
     ramp_n_per_s: tuple[float, float] = (0.5 * BENCH_RAMP_N_PER_S, 3.0 * BENCH_RAMP_N_PER_S)
     top_n: tuple[float, float] = (0.5, 2.0)                    # widened by the winch_top curriculum
+    yield_prob: float = 0.4
+    yield_top_n: tuple[float, float] = (0.0, 1.5)
     jerk_n: tuple[float, float] = (0.0, 2.0 * BENCH_JERK_N)
     jerk_hz: tuple[float, ...] = BENCH_JERK_HZ
     hz_scale: tuple[float, float] = (0.7, 1.3)
@@ -247,7 +255,9 @@ class WinchCommand(CommandTerm):
 
         hz = self.profile.new_tensor(c.jerk_hz) * draw(c.hz_scale, k)
         jerks = torch.stack([draw(c.jerk_n, k), hz, draw((0.0, 2 * math.pi), k)], dim=-1).flatten(1)
-        self.profile[env_ids] = torch.cat([draw(c.ramp_n_per_s, 1), draw(c.top_n, 1), jerks], dim=1)
+        yielding = draw((0.0, 1.0), 1) < c.yield_prob
+        top = torch.where(yielding, draw(c.yield_top_n, 1), draw(c.top_n, 1))
+        self.profile[env_ids] = torch.cat([draw(c.ramp_n_per_s, 1), top, jerks], dim=1)
 
     def _update_command(self) -> None:
         t = self._env.episode_length_buf.to(self.profile.dtype) * self._env.step_dt - self.cfg.settle_s
@@ -368,7 +378,6 @@ def make_env_cfg(
     cfg.sim.mujoco.iterations = 10
     cfg.sim.mujoco.ls_iterations = 20
     cfg.decimation = 4
-    ctrl_dt = cfg.sim.mujoco.timestep * cfg.decimation
 
     # An episode is the Arena's settle plus the bench's timed length (D11): the
     # policy lives the whole ramp, and the winch's clock (WinchCommand) runs on it.
@@ -398,8 +407,8 @@ def make_env_cfg(
     # Body-specific reward configurations
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk_base",)
     # upright: std 0.5, far looser than the sprint's √0.05. Leaning back is how a
-    # duck holds a pull, so a lean must stay cheap; the fall rule (ArenaFall,
-    # below) is the hard line.
+    # duck holds a pull, so a lean must stay cheap; going down loses nothing on
+    # the Arena (D9), so this is a preference, not a line.
     cfg.rewards["upright"].weight = knobs["upright_reward"]
     cfg.rewards["upright"].params["std"] = 0.5
 
@@ -461,13 +470,18 @@ def make_env_cfg(
         params={"std": 0.4, "asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # The pull. hold pays the winch's pull, over the bench's top, only while the
-    # duck is upright and not out (D10): it earns by pulling on its feet, more the
-    # longer it holds the rising pull. The knob a novice tunes first.
-    cfg.rewards["hold"] = RewardTermCfg(
-        func=hold,
-        weight=knobs["pull_reward"],
-        params={"fall_gravity_z": FALL_GRAVITY_Z},
+    # The pull. hold pays the winch's pull, over the bench's top, while the duck
+    # is not out, whatever its posture (D10): more the longer it holds the rising
+    # pull. The knob a novice tunes first.
+    cfg.rewards["hold"] = RewardTermCfg(func=hold, weight=knobs["pull_reward"])
+    # Backing the string end away from the pit (D14): against a yielding winch
+    # walking back reels it out, so the duck learns to pull the string taut and
+    # drag, not only to resist. Scale 0.2 m/s: backing at the event's 0.30 m/s
+    # earns tanh(1.5), 0.9 of it.
+    cfg.rewards["retreat"] = RewardTermCfg(
+        func=retreat,
+        weight=1.0,
+        params={"offset": STRING_OFFSET, "scale": 0.2},
     )
     # The ground kept between the string end and the pit's west edge; the scale
     # is the margin the duck starts with (0.35 m), so giving ground costs from
@@ -477,8 +491,8 @@ def make_env_cfg(
         weight=1.0,
         params={"offset": STRING_OFFSET, "pit_edge_x": -PIT_M / 2, "scale": 0.35},
     )
-    # Out: the pit or a fall ends the episode (terminations below), as either
-    # ends a bench run and loses a bout on the Arena (D9).
+    # Out: the pit ends the episode (terminations below), as it ends a bench run
+    # and loses a bout on the Arena (D9).
     cfg.rewards["out"] = RewardTermCfg(func=mdp.is_terminated, weight=-50.0)
 
     # Action smoothness: stage-0 value; the action_rate_weight curriculum below
@@ -490,12 +504,11 @@ def make_env_cfg(
     # 4 neck/head DOFs a position objective, so the neck is fully shaped.
 
     # === TERMINATIONS ===
-    # Exactly the Arena's two ends of a bench run (D9), the time limit and NaN
-    # physics. The pit: the trunk below -PIT_DROP_M, as arena.tug.in_pit judges
-    # it. A fall: the Arena's own rule, gravity z above FALL_GRAVITY_Z for
-    # FALL_HOLD_S of straight control steps (ArenaFall); it replaces the template's
-    # instantaneous fell_over. out_of_terrain_bounds reads mjlab's terrain, and
-    # there is none (D1).
+    # Exactly the Arena's one end of a bench run (D9), the pit, plus the time
+    # limit and NaN physics: the trunk below -PIT_DROP_M, as arena.tug.in_pit
+    # judges it. No fall: the template's fell_over goes, a duck that goes down
+    # stays in play. out_of_terrain_bounds reads mjlab's terrain, and there is
+    # none (D1).
     del cfg.terminations["fell_over"], cfg.terminations["out_of_terrain_bounds"]
     # Terminate environments that have gone numerically unstable (NaN physics).
     # MuJoCo can produce NaN joint positions on extreme contact impulses.
@@ -509,10 +522,6 @@ def make_env_cfg(
     cfg.terminations["in_pit"] = TerminationTermCfg(
         func=mdp.root_height_below_minimum,
         params={"minimum_height": -PIT_DROP_M},
-    )
-    cfg.terminations["fell"] = TerminationTermCfg(
-        func=ArenaFall,
-        params={"fall_gravity_z": FALL_GRAVITY_Z, "hold_steps": round(FALL_HOLD_S / ctrl_dt)},
     )
 
     # Events
