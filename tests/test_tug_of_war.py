@@ -511,26 +511,58 @@ def test_a_reset_clears_the_opponents_memory(live):
     assert not term.last_action[1].any() and not term.prev_joint_vel[1].any() and term.last_action[0].any()
 
 
-def _bout(seed, loser, how, time_s):
-    return arena_tug.BoutOutcome(seed, loser, how, time_s, np.zeros((2, 0, 21)), np.zeros((2, 1, 21)))
+def _standing(west_end, east_end):
+    """A bout's trace, (2, frames, 21): trunks upright, west facing east and east turned 180°, each
+    string end on the given x per frame (y 0, z 0.1)."""
+    trace = np.zeros((2, len(west_end), 21))
+    trace[0, :, 3], trace[1, :, 6] = 1.0, 1.0
+    ends = arena_tug.string_ends(trace, arena_course.string_offset("legs"))
+    trace[:, :, 0:3] = np.stack([west_end, east_end])[..., None] * [1, 0, 0] + [0, 0, 0.1] - ends
+    return trace
+
+
+def _bout(seed, loser, how, time_s, west_end=-0.5, east_end=0.4):
+    frames = round(time_s * 50)
+    one = np.full(frames, 1.0)
+    return arena_tug.BoutOutcome(seed, loser, how, time_s, _standing(west_end * one, east_end * one),
+                                 _standing(np.full(1, west_end), np.full(1, east_end)))
+
+
+def _pulled_by_a_step_back():
+    """2250 frames: the west end from -0.50 (the settle's last frame) back by 8 cm over 1.00 s, then still;
+    the east end still at +0.42."""
+    west = -0.50 - 0.08 * np.minimum(np.arange(1, 2251) / 50, 1.0)
+    return arena_tug.BoutOutcome(1, None, "draw", 45.0, _standing(west, np.full(2250, 0.42)),
+                                 _standing(np.full(1, -0.50), np.full(1, 0.42)))
+
+
+def test_a_bout_line_says_how_the_pull_went():
+    from microduck_challenges.tug_of_war import check
+    outcome = _pulled_by_a_step_back()
+    assert check.pull(outcome, "west") == "taut at 0.94 s · A backed 8.0 cm by 2 s · marker 8.0 cm to A"
+    assert check.pull(outcome, "east") == "taut at 0.94 s · A backed 0.0 cm by 2 s · marker -8.0 cm to A"
+    held = arena_tug.BoutOutcome(1, None, "draw", 45.0, _standing(np.full(2250, -0.49), np.full(2250, 0.49)),
+                                 _standing(np.full(1, -0.49), np.full(1, 0.49)))
+    assert check.pull(held, "west") == "never taut · A backed 0.0 cm by 2 s · marker 0.0 cm to A"
 
 
 def test_the_summary_counts_who_lost_and_how():
     from microduck_challenges.tug_of_war import check
     results = [("west", _bout(1, 0, "pit", 6.2)), ("east", _bout(2, 0, "pit", 3.0)),
                ("west", _bout(3, 1, "marker", 9.0)), ("east", _bout(4, None, "draw", 1.0))]
-    assert check.summary(results) == [
-        "bout 1 · seed 1 · A west · A loses by pit at 6.20 s",
-        "bout 2 · seed 2 · A east · B loses by pit at 3.00 s",
-        "bout 3 · seed 3 · A west · B loses by marker at 9.00 s",
-        "bout 4 · seed 4 · A east · drawn at 1.00 s",
-        "A 2 · B 1 · draws 1 · by pit 2 · by marker 1 · median decision 4.6 s"]
+    lines = check.summary(results)
+    assert lines[0].startswith("bout 1 · seed 1 · A west · A loses by pit at 6.20 s · ")
+    assert lines[1].startswith("bout 2 · seed 2 · A east · B loses by pit at 3.00 s · ")
+    assert lines[2].startswith("bout 3 · seed 3 · A west · B loses by marker at 9.00 s · ")
+    assert lines[3].startswith("bout 4 · seed 4 · A east · drawn at 1.00 s · ")
+    assert lines[4] == ("A 2 · B 1 · draws 1 · A in the pit 1 · B in the pit 1 · by marker 1"
+                        " · median decision 4.6 s")
 
 
-def test_the_check_swaps_sides_on_seeds_one_up(capsys):
+def test_the_check_plays_the_reference_by_default(capsys):
     from microduck_challenges.tug_of_war import check
     walker = str(ASSET_ROOT / "policies" / "BEST_alpha_walking.onnx")
-    assert check.main([walker, walker, "--bouts", "2"]) == 0
+    assert check.main([walker, "--bouts", "2"]) == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 3
     assert lines[0].startswith("bout 1 · seed 1 · A west") and lines[1].startswith("bout 2 · seed 2 · A east")

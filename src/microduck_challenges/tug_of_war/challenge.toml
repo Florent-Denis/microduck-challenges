@@ -1,6 +1,5 @@
 # The Tug of War: two ducks neck to neck over a pit, each pulling by walking
-# backwards. A duck that drops into the pit or falls over loses. Every entry
-# plays the weekly cup.
+# backwards; the pit decides. Trained against the Arena's reference duck.
 event = "tug-of-war"
 task  = "Mjlab-TugOfWar-MicroDuck"
 kind  = "perpetual"
