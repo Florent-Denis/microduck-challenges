@@ -140,7 +140,10 @@ def test_either_pit_ends_the_episode_and_pays_its_side(cfg):
     """Either pit, as on the Arena; and the learner's fall, training only (the Arena judges only the pit),
     so the duck keeps learning to stand and pull instead of lying on its side for the rest of the episode."""
     t, r = cfg.terminations, cfg.rewards
-    assert set(t) == {"time_out", "nan_state", "in_pit", "opponent_in_pit", "fell"}
+    assert set(t) == {"time_out", "nan_state", "opponent_nan_state", "in_pit", "opponent_in_pit", "fell"}
+    # The critic reads the opponent's state: a NaN there ends the episode too, paying nothing (not `out` or `win`).
+    assert (t["opponent_nan_state"].func, t["opponent_nan_state"].time_out) == (t["nan_state"].func, False)
+    assert t["opponent_nan_state"].params == {"asset_cfg": SceneEntityCfg("opponent")}
     assert t["in_pit"].params["minimum_height"] == t["opponent_in_pit"].params["minimum_height"] == -arena_tug.PIT_DROP_M
     assert t["opponent_in_pit"].params["asset_cfg"].name == "opponent"
     assert t["fell"].func is rewards.ArenaFall
@@ -362,6 +365,8 @@ def live():
 
 
 def test_the_env_runs_a_bout_on_the_actors_61_numbers(live):
+    string = live.sim.mj_model.tendon(tug.STRING).id
+    assert live.sim.model.tendon_range[:, string, 1].tolist() == [tug.SLACK_M] * 2   # step 0: slack, one limit per world
     for _ in range(10):
         obs, *_ = live.step(torch.zeros(2, 14))
     assert obs["actor"].shape == (2, 61) and torch.isfinite(obs["critic"]).all()

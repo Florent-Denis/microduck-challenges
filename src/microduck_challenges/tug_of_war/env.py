@@ -30,7 +30,8 @@ decisions, each commented where it is made:
       fall ends one too, TRAINING ONLY, with `out`: the Arena's fall rule (ArenaFall) ends a
       training episode so the duck keeps learning to stand and pull; the Arena judges only the
       pit. Without it an untrained duck falls at 1 s and lies on its side for the rest of the
-      episode, collecting the pit margin, and never learns to stand (t2, t3)
+      episode, collecting the pit margin, and never learns to stand (t2, t3). NaN physics on
+      either duck ends one too, paying nothing: the critic reads both
   D11 an episode is the settle plus a bout: `BOUT_S`
   D12 the starts: west x [west_x, west_x + 2 cm], east x [east_x - 2 cm, east_x], y ±1 cm, yaw
       ±5° (east 180° ± 5°): never farther apart than the Arena's taut start, since a stretched
@@ -476,9 +477,10 @@ def make_env_cfg(
 
     # === TERMINATIONS ===
     # The Arena's one end of a bout (D9), a pit, either duck's, plus the
-    # learner's training-only fall, the time limit and NaN physics. A pit: the
-    # trunk below -PIT_DROP_M, as arena.tug.in_pit judges it. The template's
-    # instantaneous fell_over gives way to the Arena's own fall rule (ArenaFall, below).
+    # learner's training-only fall, the time limit and NaN physics on either
+    # duck. A pit: the trunk below -PIT_DROP_M, as arena.tug.in_pit judges it.
+    # The template's instantaneous fell_over gives way to the Arena's own fall
+    # rule (ArenaFall, below).
     # out_of_terrain_bounds reads mjlab's terrain, and there is none (D1).
     del cfg.terminations["fell_over"], cfg.terminations["out_of_terrain_bounds"]
     # Terminate environments that have gone numerically unstable (NaN physics).
@@ -489,6 +491,13 @@ def make_env_cfg(
         func=microduck_mdp.robot_state_is_nan,
         time_out=False,
         params={"sensor_names": (feet_ground_cfg.name,)},
+    )
+    # The same for the opponent, whose state the critic reads (D13); it pays
+    # nothing, like nan_state.
+    cfg.terminations["opponent_nan_state"] = TerminationTermCfg(
+        func=microduck_mdp.robot_state_is_nan,
+        time_out=False,
+        params={"asset_cfg": SceneEntityCfg("opponent")},
     )
     cfg.terminations["in_pit"] = TerminationTermCfg(
         func=mdp.root_height_below_minimum,
