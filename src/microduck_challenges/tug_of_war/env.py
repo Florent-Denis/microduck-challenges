@@ -33,13 +33,16 @@ decisions, each commented where it is made:
   D11 an episode is the settle plus a bout: `BOUT_S`
   D12 the starts: west x [west_x, west_x + 2 cm], east x [east_x - 2 cm, east_x], y ±1 cm, yaw
       ±5° (east 180° ± 5°): never farther apart than the Arena's taut start, since a stretched
-      start jerks both ducks. The opponent has no action term yet: its servo targets stay 0, limp
+      start jerks both ducks
   D13 the critic alone reads the pit margin; the actor reads the Arena's 61 numbers
   D14 `retreat` pays the new ground the string end wins away from the pit (not its backward
       speed, which a sway earns with no net gain)
   D15 walking back pays three times more (`back_reward` 3.0, std √0.05: standing still keeps a
       sixth of it). t1-t5 never discovered the walk back: each dove just under the fall line
       and earned at standstill 0.41 of what walking back pays
+  D16 the opponent is the Arena's reference duck, frozen (opponent.py): an action term with no
+      agent dimension observes it as the Arena does and drives its own servos at each step's
+      start, on the state the learner's observation saw; no randomisation names it
 """
 
 import math
@@ -73,12 +76,14 @@ from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CF
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
+from .opponent import OpponentActionCfg
 from .rewards import ArenaFall, Retreat, pit_margin, pit_margin_reward
 
 # Copied from the Arena (the HF job cannot import it); tests/test_tug_of_war.py pins each one.
 LENGTH_M, WIDTH_M, WALL_HEIGHT_M = 4.0, 0.8, 0.15          # arena/events/tug-of-war.toml
 PIT_M, PIT_DEPTH_M, STRING_M = 0.30, 0.30, 1.00
 COMMAND_VX = -0.30
+COMMAND = (COMMAND_VX,) + (0.0,) * 12                      # [command], the 13 numbers a duck reads
 BOUT_S, SETTLE_S = 45.0, 0.5
 JOINT_PERTURBATION_RAD, YAW_PERTURBATION_DEG = 0.01, 2.0
 FALL_GRAVITY_Z, FALL_HOLD_S = -0.5, 0.3                    # [termination]: TRAINING ONLY here (D9)
@@ -283,7 +288,7 @@ def make_env_cfg(
     # Robot setup: the standup robot, the Arena's collision set (D7): a duck
     # dragged towards the pit touches the ground with its body, not only its feet.
     # The learner and the opponent (D4); every sensor, term and event below names
-    # `robot`; until an action term drives the opponent its servo targets stay 0 (limp).
+    # `robot` but the opponent's action term (D16) and its two resets (D12).
     cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG, "opponent": MICRODUCK_STANDUP_ROBOT_CFG}
     cfg.scene.sensors = (feet_ground_cfg, self_collision_cfg)
     cfg.viewer.body_name = "trunk_base"
@@ -312,6 +317,9 @@ def make_env_cfg(
     joint_pos_action = cfg.actions["joint_pos"]
     assert isinstance(joint_pos_action, JointPositionActionCfg)
     joint_pos_action.scale = 1.0
+    # The opponent, the reference duck frozen (D16), on the event's command. After
+    # joint_pos: its agent dimension is 0, so the learner's 14 numbers are the action.
+    cfg.actions["opponent"] = OpponentActionCfg(command=COMMAND)
 
     # === REWARDS ===
     # Pose reward configuration

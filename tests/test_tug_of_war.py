@@ -1,21 +1,22 @@
 """The Tug of War trains in the Arena's tug: the same course, string end, start and command."""
-import itertools, math, subprocess, sys, tomllib
+import hashlib, itertools, math, subprocess, sys, tomllib
 from pathlib import Path
 from types import SimpleNamespace
-import mujoco, numpy as np, pytest, torch
+import mujoco, numpy as np, onnx, onnxruntime, pytest, torch
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.scene import Scene, SceneCfg
 from mjlab_microduck import challenge as ch
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
 
-import microduck_challenges  # noqa: F401
-from arena import course as arena_course, tug as arena_tug
+import microduck_challenges
+from arena import course as arena_course, runner as arena_runner, tug as arena_tug
 from arena.assets import ASSET_ROOT
-from arena.constants import DEFAULT_POSE, JOINT_NAMES
+from arena.constants import ACTION_SCALE, DEFAULT_POSE, JOINT_NAMES
 from arena.manifest import load_event
-from microduck_challenges.tug_of_war import env as tug, rewards
+from microduck_challenges.tug_of_war import env as tug, opponent, rewards
 
 EVENT = load_event("tug-of-war")
+T7_250_SHA256 = "0c4e8b0abc9223c51bc4a32bc78591a4dc72c92ff873b6de7cd894bfad4bc1a2"
 CONTACT = ("geom_type", "geom_size", "geom_contype", "geom_conaffinity", "geom_condim", "geom_priority",
            "geom_friction", "geom_solref", "geom_solimp", "geom_solmix", "geom_margin", "geom_gap")
 TENDON = ("tendon_limited", "tendon_range", "tendon_solref_lim", "tendon_solimp_lim", "tendon_margin",
@@ -36,7 +37,8 @@ def training_model():
 
 def test_the_training_never_imports_the_arena():
     """HF Jobs install the default groups only: no Arena there. The package's __init__ imports every tasks.py."""
-    code = "import sys; sys.modules['arena'] = None; import microduck_challenges.tug_of_war.env"
+    code = ("import sys; sys.modules['arena'] = None; "
+            "import microduck_challenges.tug_of_war.env, microduck_challenges.tug_of_war.opponent")
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
@@ -44,7 +46,7 @@ def test_the_constants_are_the_arenas():
     c, s = EVENT.course, EVENT.start
     assert (tug.LENGTH_M, tug.WIDTH_M, tug.WALL_HEIGHT_M, tug.PIT_M, tug.PIT_DEPTH_M, tug.STRING_M) == (
         c.length_m, c.width_m, c.wall_height_m, c.pit_m, c.pit_depth_m, c.string_m)
-    assert tuple(EVENT.command) == (tug.COMMAND_VX,) + (0.0,) * 12
+    assert tuple(EVENT.command) == tug.COMMAND == (tug.COMMAND_VX,) + (0.0,) * 12
     assert (tug.BOUT_S, tug.SETTLE_S, tug.JOINT_PERTURBATION_RAD, tug.YAW_PERTURBATION_DEG) == (
         EVENT.bout.time_limit_s, s.settle_s, s.joint_rad, s.yaw_deg)
     # The Arena's fall rule, summaries only there: the training ends an episode on it.
@@ -300,6 +302,112 @@ def test_a_trunk_in_the_pit_ends_the_episode(live):
     live.sim.forward()
     _, _, terminated, _, _ = live.step(torch.zeros(2, 14))
     assert terminated.tolist() == [True, False]
+
+
+def _relu_actor(tmp_path):
+    """An actor the loader does not know: Sub, Div, Gemm, Relu, Gemm, 61 → 14."""
+    rng, helper = np.random.default_rng(0), onnx.helper
+    shapes = {"mean": (1, 61), "std": (1, 61), "w0": (32, 61), "b0": (32,), "w1": (14, 32), "b1": (14,)}
+    weights = [onnx.numpy_helper.from_array(rng.normal(size=shape).astype(np.float32), name) for name, shape in shapes.items()]
+    nodes = [helper.make_node("Sub", ["obs", "mean"], ["centred"]), helper.make_node("Div", ["centred", "std"], ["scaled"]),
+             helper.make_node("Gemm", ["scaled", "w0", "b0"], ["hidden"], transB=1), helper.make_node("Relu", ["hidden"], ["relu"]),
+             helper.make_node("Gemm", ["relu", "w1", "b1"], ["actions"], transB=1)]
+    graph = helper.make_graph(nodes, "actor", [helper.make_tensor_value_info("obs", onnx.TensorProto.FLOAT, [1, 61])],
+                              [helper.make_tensor_value_info("actions", onnx.TensorProto.FLOAT, [1, 14])], weights)
+    path = tmp_path / "relu.onnx"
+    onnx.save(helper.make_model(graph), path)
+    return path
+
+
+def test_the_opponent_net_is_its_onnx():
+    obs = np.random.default_rng(0).normal(0.0, 3.0, (1000, 61)).astype(np.float32)
+    session = onnxruntime.InferenceSession(str(opponent.REFERENCE), providers=["CPUExecutionProvider"])
+    theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in obs])
+    with torch.no_grad():
+        ours = opponent.load_actor(opponent.REFERENCE)(torch.from_numpy(obs)).numpy()
+    np.testing.assert_allclose(ours, theirs, atol=1e-5)
+
+
+def test_a_graph_the_loader_does_not_know_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="Relu"):
+        opponent.load_actor(_relu_actor(tmp_path))
+
+
+def test_the_reference_ships_with_the_challenge():
+    assert hashlib.sha256(opponent.REFERENCE.read_bytes()).hexdigest() == T7_250_SHA256
+    root = Path(microduck_challenges.__file__).parents[2]
+    listed = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=root,
+                            capture_output=True, text=True, check=True).stdout.split()
+    assert "src/microduck_challenges/tug_of_war/reference.onnx" in listed   # hf_jobs.py tars exactly this list
+
+
+def test_the_opponent_acts_on_the_arenas_joints(live):
+    term, duck = live.action_manager.get_term("opponent"), live.scene["opponent"]
+    assert term.target_names == list(JOINT_NAMES) and live.action_manager.total_action_dim == 14
+    home = duck.data.default_joint_pos[:, term.target_ids]
+    # mjlab_microduck's HOME_FRAME is rounded to 4 decimals: the learner carries the same gap.
+    assert home[0].tolist() == pytest.approx(list(DEFAULT_POSE), abs=5e-5)
+    act = torch.linspace(-0.2, 0.2, 14).expand(2, 14)
+    policy, term.policy = term.policy, lambda obs: act
+    try:
+        term.process_actions(torch.zeros(2, 0))
+        term.apply_actions()
+    finally:
+        term.policy = policy
+    expected = home + act * ACTION_SCALE   # runner._Duck.act, on the robot's own default
+    assert torch.allclose(duck.data.joint_pos_target[:, term.target_ids], expected, atol=1e-6)
+
+
+def _duck_addresses(model, prefix):
+    """The duck's qpos and qvel addresses: its trunk's free joint, then its joints in JOINT_NAMES order."""
+    trunk, joints = model.body(prefix + "trunk_base").jntadr[0], [model.joint(prefix + name) for name in JOINT_NAMES]
+    qpos = [*range(model.jnt_qposadr[trunk], model.jnt_qposadr[trunk] + 7), *(j.qposadr[0] for j in joints)]
+    qvel = [*range(model.jnt_dofadr[trunk], model.jnt_dofadr[trunk] + 6), *(j.dofadr[0] for j in joints)]
+    return qpos, qvel
+
+
+def test_the_opponent_observes_as_the_arena_does(live, arena_model, monkeypatch):
+    """Env 0's opponent pitched 20°, yaw 170°, joints ± U(0.2) off home, velocities U(±2), forward; known memory.
+    MjData(arena_model) gets env 0's raw qpos/qvel: trunk free joint by body, joints "opponent/x" → "duck1/x".
+    `_observe` is fed the robot's own default pose: the same formula (the HOME_FRAME gap is pinned above)."""
+    rng, term = np.random.default_rng(1), live.action_manager.get_term("opponent")
+    home = live.scene["opponent"].data.default_joint_pos[0, term.target_ids].cpu().numpy().astype(np.float64)
+    monkeypatch.setattr(arena_runner, "DEFAULT_POSE", home)
+    (qpos, qvel), (their_qpos, their_qvel) = _duck_addresses(live.sim.mj_model, "opponent/"), _duck_addresses(arena_model, "duck1/")
+    state = live.sim.data.qpos[0, qpos].cpu().numpy().astype(np.float64)
+    mujoco.mju_mulQuat(state[3:7], [math.cos(math.radians(85.0)), 0.0, 0.0, math.sin(math.radians(85.0))],
+                       [math.cos(math.radians(10.0)), 0.0, math.sin(math.radians(10.0)), 0.0])
+    state[7:] = DEFAULT_POSE + rng.uniform(-0.2, 0.2, 14)
+    live.sim.data.qpos[0, qpos] = torch.tensor(state, dtype=torch.float32)
+    live.sim.data.qvel[0, qvel] = torch.tensor(rng.uniform(-2.0, 2.0, 20), dtype=torch.float32)
+    live.sim.forward()
+    last_action, prev_joint_vel = (rng.uniform(-1.0, 1.0, 14).astype(np.float32) for _ in range(2))
+    term.last_action[0], term.prev_joint_vel[0] = torch.from_numpy(last_action), torch.from_numpy(prev_joint_vel)
+
+    data = mujoco.MjData(arena_model)
+    data.qpos[their_qpos], data.qvel[their_qvel] = live.sim.data.qpos[0, qpos].cpu().numpy(), live.sim.data.qvel[0, qvel].cpu().numpy()
+    mujoco.mj_forward(arena_model, data)
+    adr = arena_runner._Addresses.of(arena_model, EVENT.start.keyframe, "duck1/")
+    theirs = arena_runner._observe(arena_model, data, adr, last_action, np.asarray(EVENT.command, dtype=np.float64), prev_joint_vel)
+    np.testing.assert_allclose(term.observe()[0].numpy(), theirs, atol=1e-4)
+
+
+def test_the_opponent_remembers_as_the_arena_does(live):
+    term, duck = live.action_manager.get_term("opponent"), live.scene["opponent"]
+    live.reset()
+    live.step(torch.zeros(2, 14))   # moving: a reset's velocities are zeros
+    before = duck.data.joint_vel[:, term.target_ids].clone()
+    live.step(torch.zeros(2, 14))
+    obs, now = term.observe(), duck.data.joint_vel[:, term.target_ids]
+    assert torch.equal(obs[:, 20:34], before) and not torch.equal(obs[:, 20:34], now)   # a step old
+    assert torch.equal(obs[:, 34:48], term.last_action) and term.last_action.any()
+
+
+def test_a_reset_clears_the_opponents_memory(live):
+    term = live.action_manager.get_term("opponent")
+    live.step(torch.zeros(2, 14))
+    live.reset(env_ids=torch.tensor([1]))
+    assert not term.last_action[1].any() and not term.prev_joint_vel[1].any() and term.last_action[0].any()
 
 
 def _bout(seed, loser, how, time_s):
