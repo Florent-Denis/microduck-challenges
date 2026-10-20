@@ -38,6 +38,11 @@ decisions, each commented where it is made:
       (not its backward speed, which a sway earns with no net gain). The first trainings (t1)
       only resisted: every policy dove face-down under the fall line and held by friction, and
       in bouts both ducks stood still, the string slack
+  D15 locomotion first: no winch, not even a yielding one, for the first 500 iterations, and
+      walking back pays three times more (`back_reward` 3.0, std √0.05: standing still keeps a
+      sixth of it). t1-t5 never discovered the walk back, which is what tightens the string in
+      a bout: each dove just under the fall line and was dragged slowly, earning at standstill
+      0.41 of what walking back pays
 """
 
 import math
@@ -279,15 +284,16 @@ def winch_top(env) -> torch.Tensor:
 
 
 def winch_top_curriculum(env, env_ids, top_stages: list[dict]) -> dict:
-    """Widens the winch's top: `top_stages` is a list of `{"step", "top_n": (lo, hi)}`; the last
-    stage whose step the training has reached sets the range the command term `winch` draws its
-    next profiles from (microduck_mdp.reward_weight's stage pattern)."""
+    """Widens the winch's top: `top_stages` is a list of `{"step", "top_n": (lo, hi)}`, a stage
+    may also set `yield_prob`; the last stage whose step the training has reached sets what the
+    command term `winch` draws its next profiles from (microduck_mdp.reward_weight's stage pattern)."""
     del env_ids
     cfg = env.command_manager.get_term("winch").cfg
     for stage in top_stages:
         if stage["step"] <= env.common_step_counter:
             cfg.top_n = stage["top_n"]
-    return {"top_n_low": cfg.top_n[0], "top_n_high": cfg.top_n[1]}
+            cfg.yield_prob = stage.get("yield_prob", cfg.yield_prob)
+    return {"top_n_low": cfg.top_n[0], "top_n_high": cfg.top_n[1], "yield_prob": cfg.yield_prob}
 
 
 def heading_error(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -463,9 +469,11 @@ def make_env_cfg(
     cfg.rewards["angular_momentum"].weight = -0.02
 
     # Velocity tracking rewards: the twist is walking backwards at the event's
-    # speed (D6), the knob a novice tunes as "Walk backwards".
+    # speed (D6), the knob a novice tunes as "Walk backwards". std √0.05, the
+    # sprint's √0.1 halved (D15): standing still keeps e^-1.8 = 0.17 of what
+    # walking back at -0.30 m/s earns, not e^-0.9 = 0.41.
     cfg.rewards["track_linear_velocity"].weight = knobs["back_reward"]
-    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.1)
+    cfg.rewards["track_linear_velocity"].params["std"] = math.sqrt(0.05)
     cfg.rewards["track_angular_velocity"].weight = 2.0
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
@@ -900,18 +908,21 @@ def make_env_cfg(
     # curriculum — the head stays at its small initial range for the whole run
     # (see the head_pose command section above).
 
-    # The winch's top widens stage by stage, past the bench's own top_n (D12):
-    # the policy meets the bench's whole ramp and learns to lose late. Steps are
-    # env steps, NUM_STEPS_PER_ENV per training iteration (iterations 0, 500,
-    # 1000, 1500).
+    # Locomotion first (D15): no winch, not even a yielding one, until iteration
+    # 500, so the duck learns to walk backwards before anything pulls. Then the
+    # winch's top widens stage by stage, past the bench's own top_n (D12): the
+    # policy meets the bench's whole ramp and learns to lose late. Steps are env
+    # steps, NUM_STEPS_PER_ENV per training iteration (iterations 0, 500, 1000,
+    # 1500, 2000).
     cfg.curriculum["winch_top"] = CurriculumTermCfg(
         func=winch_top_curriculum,
         params={
             "top_stages": [
-                {"step": 0, "top_n": (0.5, 2.0)},
-                {"step": 500 * NUM_STEPS_PER_ENV, "top_n": (0.5, 4.0)},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "top_n": (0.5, 6.0)},
-                {"step": 1500 * NUM_STEPS_PER_ENV, "top_n": (0.5, 1.25 * BENCH_TOP_N)},
+                {"step": 0, "top_n": (0.0, 0.0), "yield_prob": 0.0},
+                {"step": 500 * NUM_STEPS_PER_ENV, "top_n": (0.5, 2.0), "yield_prob": cfg.commands["winch"].yield_prob},
+                {"step": 1000 * NUM_STEPS_PER_ENV, "top_n": (0.5, 4.0)},
+                {"step": 1500 * NUM_STEPS_PER_ENV, "top_n": (0.5, 6.0)},
+                {"step": 2000 * NUM_STEPS_PER_ENV, "top_n": (0.5, 1.25 * BENCH_TOP_N)},
             ],
         },
     )

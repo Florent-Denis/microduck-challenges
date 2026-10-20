@@ -23,7 +23,7 @@ max   = 5.0
 
 [params.back_reward]
 label = "Walk backwards"
-value = 1.0
+value = 3.0
 min   = 0.0
 max   = 4.0
 

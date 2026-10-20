@@ -1,5 +1,6 @@
 """The Tug of War trains in the Arena's tug: the same course, string, winch, pull, start and command."""
-import math, subprocess, sys
+import math, subprocess, sys, tomllib
+from pathlib import Path
 from types import SimpleNamespace
 import mujoco, numpy as np, pytest, torch
 from mjlab.envs import ManagerBasedRlEnv
@@ -236,7 +237,45 @@ def test_the_winch_top_widens_on_training_iterations(cfg):
     num_steps_per_env per training iteration."""
     assert isinstance(cfg.commands["winch"], tug.WinchCommandCfg)
     stages = cfg.curriculum["winch_top"].params["top_stages"]
-    assert [s["step"] for s in stages] == [i * tug.RL_CFG.num_steps_per_env for i in (0, 500, 1000, 1500)]
+    assert [s["step"] for s in stages] == [i * tug.RL_CFG.num_steps_per_env for i in (0, 500, 1000, 1500, 2000)]
+
+
+def test_no_winch_until_the_duck_walks_backwards(cfg, training_model):
+    """Locomotion first: no winch, not even a yielding one, for the first 500 iterations, so the duck
+    learns to walk back before anything pulls; then the old widening, 500 iterations later."""
+    n, per_iteration = 2000, tug.RL_CFG.num_steps_per_env
+    term = tug.WinchCommandCfg().build(_winch_env(training_model, n))
+    env = SimpleNamespace(common_step_counter=0, command_manager=SimpleNamespace(get_term={"winch": term}.get))
+    seen = []
+    for iteration in (0, 499, 500, 999, 1000, 1500, 2000):
+        env.common_step_counter = iteration * per_iteration
+        tug.winch_top_curriculum(env, None, cfg.curriculum["winch_top"].params["top_stages"])
+        term.reset(torch.arange(n))
+        seen.append((term.cfg.top_n, term.cfg.yield_prob))
+        pulls = tug.bench_force(term.profile, torch.full((n,), tug.TIME_LIMIT_S, dtype=term.profile.dtype))
+        assert pulls.any() == (iteration >= 500), iteration
+    on = tug.WinchCommandCfg().yield_prob
+    assert seen == [((0.0, 0.0), 0.0)] * 2 + [((0.5, 2.0), on)] * 2 + [
+        ((0.5, 4.0), on), ((0.5, 6.0), on), ((0.5, 1.25 * tug.BENCH_TOP_N), on)]
+
+
+def test_backing_away_pays_far_more_than_standing_still(cfg):
+    """t1–t5 never discovered the walk back: standing still kept 0.41 of track_linear_velocity's 1.0.
+    Walk backwards defaults to 3.0 at std √0.05: at the event's -0.30 m/s the duck earns 3.0, standing
+    still 3·e^-1.8 = 0.50."""
+    knob = tomllib.loads((Path(tug.__file__).parent / "challenge.toml").read_text())["params"]["back_reward"]
+    assert knob["value"] == 3.0 and knob["min"] <= 3.0 <= knob["max"]
+    term = cfg.rewards["track_linear_velocity"]
+    assert term.weight == 3.0 and term.params["std"] == pytest.approx(math.sqrt(0.05))
+
+    def paid(vx):
+        data = SimpleNamespace(root_link_lin_vel_b=torch.tensor([[vx, 0.0, 0.0]]))
+        env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)},
+                              command_manager=SimpleNamespace(get_command={"twist": torch.tensor([[tug.COMMAND_VX, 0.0, 0.0]])}.get))
+        return term.weight * term.func(env, **term.params).item()
+
+    assert paid(tug.COMMAND_VX) == pytest.approx(3.0)
+    assert paid(0.0) == pytest.approx(3.0 * math.exp(-1.8), abs=1e-6)   # 0.50, a sixth of walking back
 
 
 def test_the_pit_and_a_training_fall_end_an_episode(cfg):
