@@ -2,6 +2,7 @@
 import subprocess, sys
 from types import SimpleNamespace
 import mujoco, numpy as np, pytest, torch
+from mjlab.envs import ManagerBasedRlEnv
 from mjlab.scene import Scene, SceneCfg
 from mjlab_microduck import challenge as ch
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
@@ -255,3 +256,32 @@ def test_the_string_end_is_where_the_arena_judges_it():
 
 def test_the_manifest_says_what_the_policy_reads():
     assert "-0.30" in ch.for_task("Mjlab-TugOfWar-MicroDuck").command["twist"]
+
+
+@pytest.fixture(scope="module")
+def live():
+    cfg = tug.make_env_cfg()
+    cfg.scene.num_envs = 2
+    env = ManagerBasedRlEnv(cfg, device="cpu")
+    env.reset()
+    yield env
+    env.close()
+
+
+def test_the_env_pulls_on_time(live):
+    term, winch = live.command_manager.get_term("winch"), live.sim.mj_model.actuator(tug.WINCH).id
+    for _ in range(40):
+        obs, *_ = live.step(torch.zeros(2, 14))
+        t = live.episode_length_buf.double() * live.step_dt - tug.SETTLE_S
+        assert torch.allclose(live.sim.data.ctrl[:, winch], tug.bench_force(term.profile.double(), t).float(), atol=1e-5)
+    assert obs["actor"].shape == (2, 61) and torch.isfinite(obs["critic"]).all()
+
+
+def test_a_trunk_in_the_pit_ends_the_episode(live):
+    robot = live.scene["robot"]
+    pose = robot.data.root_link_pose_w.clone()
+    pose[0, 2] = -0.2
+    robot.write_root_link_pose_to_sim(pose)
+    live.sim.forward()
+    _, _, terminated, _, _ = live.step(torch.zeros(2, 14))
+    assert terminated.tolist() == [True, False]
