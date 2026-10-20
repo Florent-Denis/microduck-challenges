@@ -27,11 +27,13 @@ decisions, each commented where it is made:
   D10 `hold` pays the pull while the duck is not out, whatever its posture (D9)
   D11 an episode is the settle plus the bench's timed length: the policy lives the whole ramp
   D12 the winch's profiles hold the bench's and pull harder, up to 1.25x its top by curriculum
-  D13 the critic alone reads the pull and the pit margin; the actor reads the Arena's 61 numbers
+  D13 the critic alone reads the pull, the winch's top and the pit margin; the actor reads the
+      Arena's 61 numbers
   D14 the duck is taught to pull, not only to resist: a share of episodes draws a yielding winch
-      it can out-pull, and `retreat` pays the string end backing away from the pit. The first
-      trainings (t1) only resisted: every policy dove face-down under the fall line and held by
-      friction, and in bouts both ducks stood still, the string slack
+      it can out-pull, and `retreat` pays the new ground the string end wins away from the pit
+      (not its backward speed, which a sway earns with no net gain). The first trainings (t1)
+      only resisted: every policy dove face-down under the fall line and held by friction, and
+      in bouts both ducks stood still, the string slack
 """
 
 import math
@@ -68,7 +70,7 @@ from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CF
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
-from .rewards import hold, pit_margin, pit_margin_reward, retreat
+from .rewards import Retreat, hold, pit_margin, pit_margin_reward
 
 # Copied from the Arena (the HF job cannot import it); tests/test_tug_of_war.py pins each one.
 LENGTH_M, WIDTH_M, WALL_HEIGHT_M = 4.0, 0.8, 0.15          # arena/events/tug-of-war.toml
@@ -264,6 +266,11 @@ class WinchCommand(CommandTerm):
         pull = bench_force(self.profile, t)
         self._env.sim.data.ctrl[:, self._winch] = pull
         self._command[:, 0] = pull / BENCH_TOP_N
+
+
+def winch_top(env) -> torch.Tensor:
+    """(n, 1): the episode's winch top over the bench's, a critic-only observation (D13)."""
+    return (env.command_manager.get_term("winch").profile[:, 1:2] / BENCH_TOP_N).float()
 
 
 def winch_top_curriculum(env, env_ids, top_stages: list[dict]) -> dict:
@@ -474,12 +481,13 @@ def make_env_cfg(
     # is not out, whatever its posture (D10): more the longer it holds the rising
     # pull. The knob a novice tunes first.
     cfg.rewards["hold"] = RewardTermCfg(func=hold, weight=knobs["pull_reward"])
-    # Backing the string end away from the pit (D14): against a yielding winch
-    # walking back reels it out, so the duck learns to pull the string taut and
-    # drag, not only to resist. Scale 0.2 m/s: backing at the event's 0.30 m/s
-    # earns tanh(1.5), 0.9 of it.
+    # The new ground the string end wins away from the pit (D14): against a
+    # yielding winch walking back reels it out, so the duck learns to pull the
+    # string taut and drag, not only to resist. Only ground west of the
+    # episode's best counts, so swaying earns nothing. Scale 0.2 m/s: backing at
+    # the event's 0.30 m/s earns tanh(1.5), 0.9 of it, each step.
     cfg.rewards["retreat"] = RewardTermCfg(
-        func=retreat,
+        func=Retreat,
         weight=1.0,
         params={"offset": STRING_OFFSET, "scale": 0.2},
     )
@@ -675,13 +683,16 @@ def make_env_cfg(
     )
     # Privileged too: the heading error heading_hold prices.
     cfg.observations["critic"].terms["heading_error"] = ObservationTermCfg(func=heading_error)
-    # And what the tug's rewards pay on (D13): the winch's pull over the bench's
-    # top, and the string end's margin to the pit. The actor reads neither: on
-    # the Arena it gets the 61 numbers every legs policy gets.
+    # And what the tug's rewards pay on (D13): the winch's pull and the
+    # episode's top, each over the bench's top, and the string end's margin to
+    # the pit. The top tells a yielding episode (D14), worth ground, from a hard
+    # one. The actor reads none of them: on the Arena it gets the 61 numbers
+    # every legs policy gets.
     cfg.observations["critic"].terms["winch_pull"] = ObservationTermCfg(
         func=mdp.generated_commands,
         params={"command_name": "winch"},
     )
+    cfg.observations["critic"].terms["winch_top"] = ObservationTermCfg(func=winch_top)
     cfg.observations["critic"].terms["pit_margin"] = ObservationTermCfg(
         func=pit_margin,
         params={"offset": STRING_OFFSET, "pit_edge_x": -PIT_M / 2},

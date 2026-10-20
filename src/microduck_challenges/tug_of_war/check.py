@@ -42,10 +42,10 @@ def summary(results) -> list[str]:
     outcomes = [outcome for _, outcome in results]
     decided = [(side, o) for side, o in results if o.loser is not None]
     a_loses = sum(SIDES[o.loser] == side for side, o in decided)
-    hows = [sum(o.how == how for o in outcomes) for how in ("pit", "fall", "marker")]
+    hows = [sum(o.how == how for o in outcomes) for how in ("pit", "marker")]
     lines.append(
         f"A {len(decided) - a_loses} · B {a_loses} · draws {len(results) - len(decided)}"
-        f" · by pit {hows[0]} · by fall {hows[1]} · by marker {hows[2]}"
+        f" · by pit {hows[0]} · by marker {hows[1]}"
         f" · median decision {statistics.median(o.time_s for o in outcomes):.1f} s"
     )
     return lines

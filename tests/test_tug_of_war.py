@@ -201,8 +201,11 @@ def test_the_actor_reads_the_events_command(cfg):
         assert all(lo <= 0.0 <= hi for lo, hi in cfg.commands[name].ranges)  # the Arena sends zeros
     actor, critic = cfg.observations["actor"].terms, cfg.observations["critic"].terms
     assert list(actor)[-3:] == ["command", "head_command", "body_command"]
-    privileged = {"winch_pull", "pit_margin", "heading_error"}
+    privileged = {"winch_pull", "winch_top", "pit_margin", "heading_error"}
     assert privileged <= set(critic) and not privileged & set(actor)
+    winch = SimpleNamespace(profile=torch.tensor([[0.25, 3.5, 0.1], [0.5, 0.7, 0.2]], dtype=torch.float64))
+    env = SimpleNamespace(command_manager=SimpleNamespace(get_term={"winch": winch}.get))
+    assert critic["winch_top"].func(env).flatten().tolist() == pytest.approx([0.5, 0.1])   # the episode's top over the bench's
 
 
 def test_no_env_is_sent_forward(cfg):
@@ -242,27 +245,48 @@ def test_the_pit_alone_ends_an_episode(cfg):
 
 
 def test_hold_pays_the_pull_whatever_the_posture():
-    """The winch's pull while not out, on its feet or on its side; nothing once out."""
-    gravity = torch.tensor([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])   # upright, on its side, upright
-    env = SimpleNamespace(scene={"robot": SimpleNamespace(data=SimpleNamespace(projected_gravity_b=gravity))},
-                          command_manager=SimpleNamespace(get_command={"winch": torch.full((3, 1), 0.4)}.get),
+    """The winch's pull while not out, whatever the posture (it reads none: env 1 may lie on its side); nothing once out."""
+    env = SimpleNamespace(command_manager=SimpleNamespace(get_command={"winch": torch.full((3, 1), 0.4)}.get),
                           termination_manager=SimpleNamespace(terminated=torch.tensor([False, False, True])))
     assert rewards.hold(env).tolist() == pytest.approx([0.4, 0.4, 0.0])
 
 
-def test_retreat_pays_backing_away_from_the_pit(cfg):
-    """The string end's x velocity in the world, the trunk's plus its spin about the trunk: backing
-    away (-x) at the scale pays tanh(1), towards the pit nothing; a still trunk leaning back moves it too."""
+def _retreat_run(cfg, path, reset_at=None):
+    """What retreat pays each step for string ends at `path[k]` (x per env, m), the trunk upright,
+    the env reset just before step `reset_at`."""
     params = cfg.rewards["retreat"].params
-    assert cfg.rewards["retreat"].func is rewards.retreat and cfg.rewards["retreat"].weight == 1.0
-    assert params == {"offset": tug.STRING_OFFSET, "scale": 0.2}
-    lean_back = -0.2 / tug.STRING_OFFSET[2]   # about y: the neck, STRING_OFFSET[2] above the trunk, swings -x at 0.2 m/s
-    data = SimpleNamespace(root_link_pos_w=torch.tensor([[-0.53, 0.0, 0.11]] * 3),
-                           root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 3),
-                           root_link_lin_vel_w=torch.tensor([[-0.2, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.0, 0.0]]),
-                           root_link_ang_vel_w=torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, lean_back, 0.0]]))
-    env = SimpleNamespace(scene={"robot": SimpleNamespace(data=data)})
-    assert rewards.retreat(env, **params).tolist() == pytest.approx([math.tanh(1.0), 0.0, math.tanh(1.0)], abs=1e-6)
+    data = SimpleNamespace(root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * len(path[0])))
+    env = SimpleNamespace(num_envs=len(path[0]), device="cpu", step_dt=0.02, scene={"robot": SimpleNamespace(data=data)})
+    term = rewards.Retreat(cfg.rewards["retreat"], env)
+    paid = []
+    for k, xs in enumerate(path):
+        if k == reset_at:
+            term.reset(torch.tensor([0]))
+        data.root_link_pos_w = torch.tensor([[x - tug.STRING_OFFSET[0], 0.0, 0.11] for x in xs])
+        paid.append(term(env, **params).tolist())
+    return paid
+
+
+def test_retreat_pays_new_ground(cfg):
+    """Each step, the ground the string end gains west of the westmost point it reached this episode,
+    at the scale's pace (0.2 m/s) tanh(1): a steady walk back pays it every step, being dragged east
+    nothing, a sway with no net gain only its first new ground."""
+    assert cfg.rewards["retreat"].func is rewards.Retreat and cfg.rewards["retreat"].weight == 1.0
+    assert cfg.rewards["retreat"].params == {"offset": tug.STRING_OFFSET, "scale": 0.2}
+    step = 0.2 * 0.02   # 0.2 m/s over a control step
+    sway = [-0.5, -0.5 - step, -0.5 + step] * 4
+    paid = _retreat_run(cfg, [(-0.5 - k * step, -0.5 + k * step, sway[k]) for k in range(12)])
+    walk, dragged, swayed = zip(*paid)
+    assert walk[0] == 0.0 and walk[1:] == pytest.approx([math.tanh(1.0)] * 11, abs=1e-4)
+    assert dragged == (0.0,) * 12
+    assert swayed[1] == pytest.approx(math.tanh(1.0), abs=1e-4) and swayed[:1] + swayed[2:] == (0.0,) * 11
+
+
+def test_a_reset_clears_the_retreat_record(cfg):
+    """Back at the start after a reset, the ground the last episode won is new again."""
+    step = 0.2 * 0.02
+    paid = _retreat_run(cfg, [(-0.5 - k * step,) for k in range(10)] + [(-0.5 - k * step,) for k in range(3)], reset_at=10)
+    assert [p[0] for p in paid[10:]] == pytest.approx([0.0, math.tanh(1.0), math.tanh(1.0)], abs=1e-4)
 
 
 def test_the_string_end_is_where_the_arena_judges_it():
@@ -315,14 +339,14 @@ def _bout(seed, loser, how, time_s):
 
 def test_the_summary_counts_who_lost_and_how():
     from microduck_challenges.tug_of_war import check
-    results = [("west", _bout(1, 0, "pit", 6.2)), ("east", _bout(2, 0, "fall", 3.0)),
+    results = [("west", _bout(1, 0, "pit", 6.2)), ("east", _bout(2, 0, "pit", 3.0)),
                ("west", _bout(3, 1, "marker", 9.0)), ("east", _bout(4, None, "draw", 1.0))]
     assert check.summary(results) == [
         "bout 1 · seed 1 · A west · A loses by pit at 6.20 s",
-        "bout 2 · seed 2 · A east · B loses by fall at 3.00 s",
+        "bout 2 · seed 2 · A east · B loses by pit at 3.00 s",
         "bout 3 · seed 3 · A west · B loses by marker at 9.00 s",
         "bout 4 · seed 4 · A east · drawn at 1.00 s",
-        "A 2 · B 1 · draws 1 · by pit 1 · by fall 1 · by marker 1 · median decision 4.6 s"]
+        "A 2 · B 1 · draws 1 · by pit 2 · by marker 1 · median decision 4.6 s"]
 
 
 def test_the_check_swaps_sides_on_seeds_one_up(capsys):
