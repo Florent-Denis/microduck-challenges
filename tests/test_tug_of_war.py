@@ -372,14 +372,44 @@ def test_the_env_runs_a_bout_on_the_actors_61_numbers(live):
     assert obs["actor"].shape == (2, 61) and torch.isfinite(obs["critic"]).all()
 
 
-def test_a_trunk_in_the_pit_ends_the_episode(live):
-    robot = live.scene["robot"]
-    pose = robot.data.root_link_pose_w.clone()
-    pose[0, 2] = -0.2
-    robot.write_root_link_pose_to_sim(pose)
+def test_the_opponent_starts_where_the_arenas_east_duck_does(live):
+    live.reset()
+    east, data = arena_course.tug_layout(EVENT.course)[1], live.scene["opponent"].data
+    pos, quat = data.root_link_pos_w, data.root_link_quat_w
+    assert ((pos[:, 0] - east.x).abs() <= 0.02).all() and ((pos[:, 1] - east.y).abs() <= 0.01).all()
+    yaw = torch.rad2deg(2 * torch.atan2(quat[:, 3], quat[:, 0])) % 360
+    assert ((yaw - 180.0).abs() <= 5.0 + 1e-3).all()
+
+
+def test_the_string_turns_taut_episode_by_episode(live):
+    string = live.sim.mj_model.tendon(tug.STRING).id
+    live.common_step_counter = 0
+    live.reset()
+    assert live.sim.model.tendon_range[:, string, 1].tolist() == [tug.SLACK_M] * 2
+    live.common_step_counter = tug.TAUT_FROM_ITERATION * tug.RL_CFG.num_steps_per_env
+    live.reset(env_ids=torch.tensor([0]))
+    assert live.sim.model.tendon_range[:, string, 1].tolist() == [tug.STRING_M, tug.SLACK_M]
+
+
+def test_a_pit_on_either_side_ends_the_episode(live):
+    live.reset()
+    for env, name in ((0, "robot"), (1, "opponent")):
+        duck = live.scene[name]
+        pose = duck.data.root_link_pose_w.clone()
+        pose[env, 2] = -0.2
+        duck.write_root_link_pose_to_sim(pose)
     live.sim.forward()
     _, _, terminated, _, _ = live.step(torch.zeros(2, 14))
-    assert terminated.tolist() == [True, False]
+    assert terminated.tolist() == [True, True]
+    assert live.termination_manager.get_term("in_pit").tolist() == [True, False]
+    assert live.termination_manager.get_term("opponent_in_pit").tolist() == [False, True]
+
+
+def test_a_bout_steps(live):
+    live.reset()
+    for _ in range(25):
+        obs, *_ = live.step(torch.zeros(2, 14))
+    assert obs["actor"].shape == (2, 61) and torch.isfinite(obs["critic"]).all()
 
 
 def _relu_actor(tmp_path):
