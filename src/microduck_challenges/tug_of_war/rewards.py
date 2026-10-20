@@ -1,5 +1,5 @@
 """The Tug of War's own terms: how far the string end is from the pit, the new ground it wins
-away from it, the pull held, and the Arena's fall rule as a training-only termination.
+away from it, and the Arena's fall rule as a training-only termination.
 
 The string end is where the Arena ties the string, the base of the neck: the trunk's position
 plus the offset turned by the trunk's quaternion, as `arena.tug.string_ends` reads a trace.
@@ -47,11 +47,6 @@ class Retreat(ManagerTermBase):
 
     def reset(self, env_ids) -> None:
         self._best[env_ids] = float("nan")
-
-
-def hold(env) -> torch.Tensor:
-    """(n,): the winch's pull over the bench's top while the duck is not out, whatever its posture."""
-    return env.command_manager.get_command("winch")[:, 0] * ~env.termination_manager.terminated
 
 
 class ArenaFall(ManagerTermBase):

@@ -1,7 +1,6 @@
 # The Tug of War: two ducks neck to neck over a pit, each pulling by walking
-# backwards. A duck that drops into the pit or falls over loses. The Arena rates
-# the policy on its pulling bench, a winch that pulls harder and harder, in
-# newtons, the mean of five seeds; every entry plays the weekly cup.
+# backwards. A duck that drops into the pit or falls over loses. Every entry
+# plays the weekly cup.
 event = "tug-of-war"
 task  = "Mjlab-TugOfWar-MicroDuck"
 kind  = "perpetual"
@@ -14,12 +13,6 @@ twist = "[vx: the Arena sends -0.30 m/s, walk backwards; unused; unused]"
 num_envs       = 4096
 max_iterations = 3000
 seed           = 1
-
-[params.pull_reward]
-label = "Hold the pull"
-value = 2.0
-min   = 0.5
-max   = 5.0
 
 [params.back_reward]
 label = "Walk backwards"

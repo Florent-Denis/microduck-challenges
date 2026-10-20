@@ -1,11 +1,9 @@
-"""The Tug of War's training environment: the 2 m Sprint's recipe made the tug's, on the
-Arena's pulling bench.
+"""The Tug of War's training environment: the 2 m Sprint's recipe made the tug's.
 
-The duck trains on the Arena's tug: a lane cut by a pit, the west duck's start, a string tied
-at the base of its neck and run to a winch that pulls it towards the pit. The HF job installs
-no Arena, so the event's numbers and the course's arithmetic (arena/course.py) are copied here;
-tests/test_tug_of_war.py pins each copy against the Arena's own model. The winch pulls, each
-episode, a profile drawn around the bench's, on the Arena's clock (`WinchCommand`).
+The duck trains on the Arena's tug: a lane cut by a pit, the west duck's start, a string end at
+the base of its neck. It is alone on the lane for a bout's length. The HF job installs no Arena,
+so the event's numbers and the course's arithmetic (arena/course.py) are copied here;
+tests/test_tug_of_war.py pins each copy against the Arena's own model.
 
 `make_env_cfg` is the sprint's recipe (sprint_2m/env.py), the shortest way to a duck that steps
 backwards, with the three rewards a novice tunes read from challenge.toml ([params]). Everything
@@ -17,7 +15,6 @@ decisions, each commented where it is made:
       holds it at the Arena's coordinates (no mjlab terrain has a pit)
   D2  the course body is named `terrain`, as the foot contact sensor expects
   D3  `tug_scene` adds the string's site, so the robot cfg stays untouched
-  D4  the winch is the Arena's tendon and motor, its ctrl written by the `winch` command term
   D5  the Arena's numbers are copied below, pinned by the parity tests
   D6  the twist is the event's fixed command, -0.30 m/s backwards, in every env
   D7  the Arena's collision set (the standup robot: a dragged duck touches with its body) and
@@ -27,27 +24,18 @@ decisions, each commented where it is made:
       one too, TRAINING ONLY, with the same penalty: the Arena's fall rule (ArenaFall) ends a
       training episode so the duck keeps learning to stand and pull; the Arena judges only the
       pit. Without it an untrained duck falls at 1 s and lies on its side for the rest of the
-      episode, collecting `hold` and the pit margin, and never learns to stand (t2, t3)
-  D10 `hold` pays the pull while the duck is not out, whatever its posture (D9)
-  D11 an episode is the settle plus the bench's timed length: the policy lives the whole ramp
-  D12 the winch's profiles hold the bench's and pull harder, up to 1.25x its top by curriculum
-  D13 the critic alone reads the pull, the winch's top and the pit margin; the actor reads the
-      Arena's 61 numbers
-  D14 the duck is taught to pull, not only to resist: a share of episodes draws a yielding winch
-      it can out-pull, and `retreat` pays the new ground the string end wins away from the pit
-      (not its backward speed, which a sway earns with no net gain). The first trainings (t1)
-      only resisted: every policy dove face-down under the fall line and held by friction, and
-      in bouts both ducks stood still, the string slack
-  D15 locomotion first: no winch, not even a yielding one, for the first 500 iterations, and
-      walking back pays three times more (`back_reward` 3.0, std √0.05: standing still keeps a
-      sixth of it). t1-t5 never discovered the walk back, which is what tightens the string in
-      a bout: each dove just under the fall line and was dragged slowly, earning at standstill
-      0.41 of what walking back pays
+      episode, collecting the pit margin, and never learns to stand (t2, t3)
+  D11 an episode is the settle plus a bout: `BOUT_S`
+  D13 the critic alone reads the pit margin; the actor reads the Arena's 61 numbers
+  D14 `retreat` pays the new ground the string end wins away from the pit (not its backward
+      speed, which a sway earns with no net gain)
+  D15 walking back pays three times more (`back_reward` 3.0, std √0.05: standing still keeps a
+      sixth of it). t1-t5 never discovered the walk back: each dove just under the fall line
+      and earned at standstill 0.41 of what walking back pays
 """
 
 import math
 from copy import deepcopy
-from dataclasses import dataclass
 
 import mujoco
 import torch
@@ -55,8 +43,6 @@ from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import (
-    CommandTerm,
-    CommandTermCfg,
     CurriculumTermCfg,
     EventTermCfg,
     ObservationTermCfg,
@@ -79,20 +65,19 @@ from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CF
 from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
-from .rewards import ArenaFall, Retreat, hold, pit_margin, pit_margin_reward
+from .rewards import ArenaFall, Retreat, pit_margin, pit_margin_reward
 
 # Copied from the Arena (the HF job cannot import it); tests/test_tug_of_war.py pins each one.
 LENGTH_M, WIDTH_M, WALL_HEIGHT_M = 4.0, 0.8, 0.15          # arena/events/tug-of-war.toml
 PIT_M, PIT_DEPTH_M, STRING_M = 0.30, 0.30, 1.00
 COMMAND_VX = -0.30
-TIME_LIMIT_S, SETTLE_S = 30.0, 0.5
+BOUT_S, SETTLE_S = 20.0, 0.5
 JOINT_PERTURBATION_RAD, YAW_PERTURBATION_DEG = 0.01, 2.0
 FALL_GRAVITY_Z, FALL_HOLD_S = -0.5, 0.3                    # [termination]: TRAINING ONLY here (D9)
-BENCH_RAMP_N_PER_S, BENCH_TOP_N, BENCH_JERK_N, BENCH_JERK_HZ = 0.25, 7.0, 0.4, (0.7, 1.9)
-SPAWN_HEIGHT_M, WALL_THICKNESS_M, PLATFORM_OVERRUN_M = 0.12, 0.05, 20.0   # arena/course.py
+WALL_THICKNESS_M, PLATFORM_OVERRUN_M = 0.05, 20.0           # arena/course.py
 STRING_OFFSET = (0.026, 0.0145, 0.0324215)                 # string_offset("legs")
 PIT_DROP_M = 0.05                                          # arena/tug.py
-STRING_SITE, STRING, WINCH_SITE, WINCH = "string_end", "string", "winch_drum", "winch"
+STRING_SITE = "string_end"
 
 ROBOT = "robot/"  # the prefix mjlab attaches the robot entity under
 
@@ -171,129 +156,23 @@ def course_boxes() -> list[tuple[str, tuple, tuple]]:
 
 
 def west_start() -> tuple[float, float]:
-    """The bench duck's trunk (x, y), facing east: its string end on y = 0, half the string
+    """The west duck's trunk (x, y), facing east: its string end on y = 0, half the string
     west of the pit's centre."""
     ox, oy, _ = STRING_OFFSET
     half = STRING_M / 2
     return -half - ox, -oy
 
 
-def winch_position() -> tuple[float, float, float]:
-    """The drum: where a duck facing west would hold the other end, so the string starts taut."""
-    return (STRING_M / 2, 0.0, SPAWN_HEIGHT_M + STRING_OFFSET[2])
-
-
 def tug_scene(spec: mujoco.MjSpec) -> None:
-    """mjlab's `SceneCfg.spec_fn`: the Arena's bench, built on the scene once the robot is in.
+    """mjlab's `SceneCfg.spec_fn`: the Arena's course, built on the scene once the robot is in.
 
     The course is a static body named `terrain`, as mjlab's foot contact sensor expects. The
-    string runs from the base of the neck to the drum; the winch is a motor on it whose ctrl is
-    the pull in newtons (gear -1: a positive ctrl shortens the string). It is the scene's last
-    actuator, so the robot's ctrl addresses stay, and the scene keyframe takes its 0.0.
+    string end is a site at the base of the neck.
     """
     terrain = spec.worldbody.add_body(name="terrain")
     for name, pos, size in course_boxes():
         terrain.add_geom(name=name, type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size)
     spec.body(ROBOT + "trunk_base").add_site(name=ROBOT + STRING_SITE, pos=STRING_OFFSET)
-    spec.worldbody.add_site(name=WINCH_SITE, pos=winch_position())
-    string = spec.add_tendon(name=STRING)
-    string.wrap_site(ROBOT + STRING_SITE)
-    string.wrap_site(WINCH_SITE)
-    winch = spec.add_actuator(name=WINCH, target=STRING, trntype=mujoco.mjtTrn.mjTRN_TENDON)
-    winch.set_to_motor()
-    winch.gear = [-1.0, 0, 0, 0, 0, 0]
-    key = spec.key("init_state")
-    key.ctrl = [*key.ctrl, 0.0]
-
-
-def bench_force(profile: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-    """The winch's pull in newtons per row: arena.tug.bench_force on `profile`, (n, 2 + 3k) as
-    ramp, top, then (amp, hz, phase) per jerk, at `t`, (n,) seconds into the timed run; 0 before
-    it starts, through the settle."""
-    amp, hz, phase = profile[:, 2:].unflatten(1, (-1, 3)).unbind(-1)
-    pull = profile[:, 0] * t + (amp * torch.sin(2 * math.pi * hz * t[:, None] + phase)).sum(1)
-    return torch.where(t < 0, 0.0, torch.minimum(profile[:, 1], pull.clamp(min=0.0)))
-
-
-@dataclass(kw_only=True)
-class WinchCommandCfg(CommandTermCfg):
-    """The ranges each episode's profile is drawn from: they hold the bench's ramp, jerks and
-    frequencies, and pull harder, so the policy meets the bench's pull and learns to lose late.
-    A share `yield_prob` of the episodes yields instead (D14): its top comes from `yield_top_n`,
-    a pull the duck can out-pull, so walking back reels the winch out and the duck learns to pull."""
-
-    resampling_time_range: tuple[float, float] = (1e9, 1e9)   # one profile per episode, drawn at reset
-    ramp_n_per_s: tuple[float, float] = (0.5 * BENCH_RAMP_N_PER_S, 3.0 * BENCH_RAMP_N_PER_S)
-    top_n: tuple[float, float] = (0.5, 2.0)                    # widened by the winch_top curriculum
-    yield_prob: float = 0.4
-    yield_top_n: tuple[float, float] = (0.0, 1.5)
-    jerk_n: tuple[float, float] = (0.0, 2.0 * BENCH_JERK_N)
-    jerk_hz: tuple[float, ...] = BENCH_JERK_HZ
-    hz_scale: tuple[float, float] = (0.7, 1.3)
-    settle_s: float = SETTLE_S
-
-    def build(self, env) -> "WinchCommand":
-        return WinchCommand(self, env)
-
-
-class WinchCommand(CommandTerm):
-    """The winch: draws the episode's profile at reset and, before every control step, writes
-    the pull the Arena's bench applies at that time to the winch's ctrl (0 through the settle).
-    The winch is no robot actuator, so mjlab never writes its ctrl: the pull holds through the
-    step's physics, as the Arena sets it before each timed step."""
-
-    cfg: WinchCommandCfg
-
-    def __init__(self, cfg: WinchCommandCfg, env):
-        super().__init__(cfg, env)
-        self._winch = env.sim.mj_model.actuator(WINCH).id
-        # float64, as the Arena computes the pull: a float32 step · 0.02 − 0.5 is off by up to 1.6 µs.
-        self.profile = torch.zeros(self.num_envs, 2 + 3 * len(cfg.jerk_hz), dtype=torch.float64, device=self.device)
-        self._command = torch.zeros(self.num_envs, 1, device=self.device)
-
-    @property
-    def command(self) -> torch.Tensor:
-        """(num_envs, 1): the pull now over the bench's top."""
-        return self._command
-
-    def _update_metrics(self) -> None:
-        pass  # nothing to log; mjlab requires the method
-
-    def _resample_command(self, env_ids: torch.Tensor) -> None:
-        c, k = self.cfg, len(self.cfg.jerk_hz)
-
-        def draw(range_: tuple[float, float], width: int) -> torch.Tensor:
-            return self.profile.new_empty(len(env_ids), width).uniform_(*range_)
-
-        hz = self.profile.new_tensor(c.jerk_hz) * draw(c.hz_scale, k)
-        jerks = torch.stack([draw(c.jerk_n, k), hz, draw((0.0, 2 * math.pi), k)], dim=-1).flatten(1)
-        yielding = draw((0.0, 1.0), 1) < c.yield_prob
-        top = torch.where(yielding, draw(c.yield_top_n, 1), draw(c.top_n, 1))
-        self.profile[env_ids] = torch.cat([draw(c.ramp_n_per_s, 1), top, jerks], dim=1)
-
-    def _update_command(self) -> None:
-        t = self._env.episode_length_buf.to(self.profile.dtype) * self._env.step_dt - self.cfg.settle_s
-        pull = bench_force(self.profile, t)
-        self._env.sim.data.ctrl[:, self._winch] = pull
-        self._command[:, 0] = pull / BENCH_TOP_N
-
-
-def winch_top(env) -> torch.Tensor:
-    """(n, 1): the episode's winch top over the bench's, a critic-only observation (D13)."""
-    return (env.command_manager.get_term("winch").profile[:, 1:2] / BENCH_TOP_N).float()
-
-
-def winch_top_curriculum(env, env_ids, top_stages: list[dict]) -> dict:
-    """Widens the winch's top: `top_stages` is a list of `{"step", "top_n": (lo, hi)}`, a stage
-    may also set `yield_prob`; the last stage whose step the training has reached sets what the
-    command term `winch` draws its next profiles from (microduck_mdp.reward_weight's stage pattern)."""
-    del env_ids
-    cfg = env.command_manager.get_term("winch").cfg
-    for stage in top_stages:
-        if stage["step"] <= env.common_step_counter:
-            cfg.top_n = stage["top_n"]
-            cfg.yield_prob = stage.get("yield_prob", cfg.yield_prob)
-    return {"top_n_low": cfg.top_n[0], "top_n_high": cfg.top_n[1], "yield_prob": cfg.yield_prob}
 
 
 def heading_error(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -383,7 +262,7 @@ def make_env_cfg(
 
     # The course is the Arena's tug, built on the scene by tug_scene (D1–D3): no
     # mjlab terrain has a pit, and without one every env origin is 0, so each
-    # world holds the course, the string and the winch at the Arena's coordinates.
+    # world holds the course and the string end at the Arena's coordinates.
     cfg.scene.terrain = None
     cfg.scene.spec_fn = tug_scene
 
@@ -398,9 +277,8 @@ def make_env_cfg(
     cfg.decimation = 4
     ctrl_dt = cfg.sim.mujoco.timestep * cfg.decimation
 
-    # An episode is the Arena's settle plus the bench's timed length (D11): the
-    # policy lives the whole ramp, and the winch's clock (WinchCommand) runs on it.
-    cfg.episode_length_s = SETTLE_S + TIME_LIMIT_S
+    # An episode is the Arena's settle plus a bout (D11).
+    cfg.episode_length_s = SETTLE_S + BOUT_S
 
     # Action configuration
     joint_pos_action = cfg.actions["joint_pos"]
@@ -437,7 +315,7 @@ def make_env_cfg(
     # Body-specific configurations
     cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk_base",)
 
-    # foot_slip weak (-0.1): under the winch's pull a planted foot may slide,
+    # foot_slip weak (-0.1): under a pull a planted foot may slide,
     # and keeping its feet under it matters more than keeping them still.
     cfg.rewards["foot_slip"].weight = -0.1
     cfg.rewards["foot_slip"].params["command_threshold"] = 0.01
@@ -491,15 +369,9 @@ def make_env_cfg(
         params={"std": 0.4, "asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # The pull. hold pays the winch's pull, over the bench's top, while the duck
-    # is not out, whatever its posture (D10): more the longer it holds the rising
-    # pull. The knob a novice tunes first.
-    cfg.rewards["hold"] = RewardTermCfg(func=hold, weight=knobs["pull_reward"])
-    # The new ground the string end wins away from the pit (D14): against a
-    # yielding winch walking back reels it out, so the duck learns to pull the
-    # string taut and drag, not only to resist. Only ground west of the
-    # episode's best counts, so swaying earns nothing. Scale 0.2 m/s: backing at
-    # the event's 0.30 m/s earns tanh(1.5), 0.9 of it, each step.
+    # The new ground the string end wins away from the pit (D14). Only ground
+    # west of the episode's best counts, so swaying earns nothing. Scale 0.2 m/s:
+    # backing at the event's 0.30 m/s earns tanh(1.5), 0.9 of it, each step.
     cfg.rewards["retreat"] = RewardTermCfg(
         func=Retreat,
         weight=1.0,
@@ -514,7 +386,7 @@ def make_env_cfg(
         params={"offset": STRING_OFFSET, "pit_edge_x": -PIT_M / 2, "scale": 0.35},
     )
     # Out: the pit or, training only, a fall ends the episode (terminations
-    # below); the pit ends a bench run and loses a bout on the Arena (D9).
+    # below); the pit loses a bout on the Arena (D9).
     cfg.rewards["out"] = RewardTermCfg(func=mdp.is_terminated, weight=-50.0)
 
     # Action smoothness: stage-0 value; the action_rate_weight curriculum below
@@ -526,7 +398,7 @@ def make_env_cfg(
     # 4 neck/head DOFs a position objective, so the neck is fully shaped.
 
     # === TERMINATIONS ===
-    # The Arena's one end of a bench run (D9), the pit, plus a training-only
+    # The Arena's one end of a bout (D9), the pit, plus a training-only
     # fall, the time limit and NaN physics. The pit: the trunk below
     # -PIT_DROP_M, as arena.tug.in_pit judges it. The template's instantaneous
     # fell_over gives way to the Arena's own fall rule (ArenaFall, below).
@@ -574,9 +446,9 @@ def make_env_cfg(
 
     # The start is the Arena's west duck (arena.course.tug_layout): facing east,
     # its string end on y = 0, half the string west of the pit's centre, the
-    # string taut to the drum. ±2 cm and ±5° (the Arena perturbs its yaw by
-    # ±YAW_PERTURBATION_DEG) instead of the template's ±0.5 m and ±π, which
-    # would start ducks over the pit or facing away from the winch. The joints
+    # ±2 cm and ±5° (the Arena perturbs its yaw by ±YAW_PERTURBATION_DEG)
+    # instead of the template's ±0.5 m and ±π, which would start ducks over the
+    # pit or facing away from the lane. The joints
     # get the Arena's perturbation.
     west_x, west_y = west_start()
     cfg.events["reset_base"].params["pose_range"] = {
@@ -705,16 +577,9 @@ def make_env_cfg(
     )
     # Privileged too: the heading error heading_hold prices.
     cfg.observations["critic"].terms["heading_error"] = ObservationTermCfg(func=heading_error)
-    # And what the tug's rewards pay on (D13): the winch's pull and the
-    # episode's top, each over the bench's top, and the string end's margin to
-    # the pit. The top tells a yielding episode (D14), worth ground, from a hard
-    # one. The actor reads none of them: on the Arena it gets the 61 numbers
+    # And what the tug's rewards pay on (D13): the string end's margin to the
+    # pit. The actor reads none of it: on the Arena it gets the 61 numbers
     # every legs policy gets.
-    cfg.observations["critic"].terms["winch_pull"] = ObservationTermCfg(
-        func=mdp.generated_commands,
-        params={"command_name": "winch"},
-    )
-    cfg.observations["critic"].terms["winch_top"] = ObservationTermCfg(func=winch_top)
     cfg.observations["critic"].terms["pit_margin"] = ObservationTermCfg(
         func=pit_margin,
         params={"offset": STRING_OFFSET, "pit_edge_x": -PIT_M / 2},
@@ -840,11 +705,6 @@ def make_env_cfg(
         ),
     )
 
-    # The winch (D4): the pull of an episode's profile, drawn around the bench's,
-    # on the Arena's clock. Named `winch`: winch_top_curriculum, hold and the
-    # critic's winch_pull find it by that name.
-    cfg.commands["winch"] = WinchCommandCfg()
-
     # Append head + body command obs terms to both policy and critic groups.
     # Order matters for the runtime obs layout: [twist(3), head_pose(4), body_pose(6)].
     for group in ("actor", "critic"):
@@ -907,25 +767,6 @@ def make_env_cfg(
     # fixed (see the command section above). Same for head_pose: no range
     # curriculum — the head stays at its small initial range for the whole run
     # (see the head_pose command section above).
-
-    # Locomotion first (D15): no winch, not even a yielding one, until iteration
-    # 500, so the duck learns to walk backwards before anything pulls. Then the
-    # winch's top widens stage by stage, past the bench's own top_n (D12): the
-    # policy meets the bench's whole ramp and learns to lose late. Steps are env
-    # steps, NUM_STEPS_PER_ENV per training iteration (iterations 0, 500, 1000,
-    # 1500, 2000).
-    cfg.curriculum["winch_top"] = CurriculumTermCfg(
-        func=winch_top_curriculum,
-        params={
-            "top_stages": [
-                {"step": 0, "top_n": (0.0, 0.0), "yield_prob": 0.0},
-                {"step": 500 * NUM_STEPS_PER_ENV, "top_n": (0.5, 2.0), "yield_prob": cfg.commands["winch"].yield_prob},
-                {"step": 1000 * NUM_STEPS_PER_ENV, "top_n": (0.5, 4.0)},
-                {"step": 1500 * NUM_STEPS_PER_ENV, "top_n": (0.5, 6.0)},
-                {"step": 2000 * NUM_STEPS_PER_ENV, "top_n": (0.5, 1.25 * BENCH_TOP_N)},
-            ],
-        },
-    )
 
     # CoM randomization range curriculum - start small, ramp up
     if ENABLE_COM_RANDOMIZATION:
