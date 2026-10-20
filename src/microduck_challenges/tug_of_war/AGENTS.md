@@ -24,10 +24,10 @@ The rules, from `arena/events/tug-of-war.toml` in the installed Arena:
 - **Command**: the policy reads `[-0.30, 0, 0]`, constant for the whole bout: walk backwards at
   0.30 m/s. Head and body commands are zeros. It is never told its heading or its position.
 - **A bout is judged**: a duck that drops into the pit **or falls over loses** (a fall is the trunk
-  tilted more than 60°, gravity z above −0.5, for 0.3 s). If neither happens by the time limit
-  (**30 s**), the marker decides.
+  tilted more than 60°, gravity z above −0.5, for 0.3 s). If neither happens by the bout's time
+  limit (**20 s**), the marker decides.
 - **The rating**: the pulling bench. A winch pulls the duck's string harder and harder (0.25 N per
-  second, up to 7 N) until the duck is out; the rating is the **mean of five seeds of the force it
+  second, up to 7 N) until the duck is out, within a timed run of **30 s** after the settle; the rating is the **mean of five seeds of the force it
   held, in newtons, and higher wins**. `arena score` prints it.
 - **The weekly cup**: every entry plays it, bout against bout; the rating ranks the board.
 
@@ -143,8 +143,8 @@ Agree with the user before the first run:
   " logs/rsl_rl/tug_of_war/<run> Train/mean_episode_length Episode_Termination/in_pit Episode_Termination/fell Episode_Reward/hold
   ```
 
-  Healthy: `Train/mean_episode_length` climbs toward its cap (30.5 s, the settle plus the time
-  limit), `in_pit` and `fell` drop, `hold` keeps growing. A drop right at a winch curriculum stage
+  Healthy: `Train/mean_episode_length` climbs toward 1525 control steps (30.5 s, the settle plus the bench's
+  30 s timed run), `in_pit` and `fell` drop, `hold` keeps growing. A drop right at a winch curriculum stage
   (iterations 500, 1000, 1500) is expected: the winch pulls harder there. Warning signs: total
   reward rising while `hold` stays flat; `nan_state` terminations. A run that has collapsed and not
   recovered within about 500 iterations: tell the user and propose stopping it.
