@@ -339,8 +339,10 @@ def make_env_cfg(
 
     # The Arena's solver (D7, arena/course.py): implicitfast, 10/20 iterations,
     # 0.005 s physics steps, 4 per 0.02 s control step. nconmax is a contact
-    # buffer, not physics: 400 keeps two ducks lying on the platform from overflowing it.
-    cfg.sim.nconmax = 400
+    # buffer, not physics, and every world's CCD scratch is sized from it: an
+    # Arena bout peaks at 19 contacts (two ducks, one dragged into the pit), so
+    # 200 is ten times that; 400 asked 4.4 GB more of the L4 at 4096 envs (t8, t9).
+    cfg.sim.nconmax = 200
     cfg.sim.mujoco.integrator = "implicitfast"
     cfg.sim.mujoco.timestep = 0.005
     cfg.sim.mujoco.iterations = 10
