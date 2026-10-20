@@ -61,7 +61,7 @@ from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from mjlab_microduck import challenge
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
 from mjlab_microduck.tasks import mdp as microduck_mdp
-from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg, SYMMETRY_CFG
+from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
 from .rewards import ArenaFall, hold, pit_margin, pit_margin_reward
 
@@ -80,36 +80,25 @@ STRING_SITE, STRING, WINCH_SITE, WINCH = "string_end", "string", "winch_drum", "
 
 ROBOT = "robot/"  # the prefix mjlab attaches the robot entity under
 
-# The sprint's recipe switches and ranges (sprint_2m/env.py), unchanged.
+# The sprint's recipe switches and ranges (sprint_2m/env.py), the ones it uses.
 NUM_STEPS_PER_ENV = 24
-
-# Symmetry
-ENABLE_SYMMETRY = False
 
 # Domain randomization toggles
 ENABLE_COM_RANDOMIZATION = True
 ENABLE_HEAD_COM_RANDOMIZATION = True  # Randomize CoM of the head assembly bodies
-ENABLE_KP_RANDOMIZATION = False # Was True
-ENABLE_KD_RANDOMIZATION = False # Was True
 ENABLE_MASS_INERTIA_RANDOMIZATION = True  # Can enable once walking is stable
 ENABLE_JOINT_FRICTION_RANDOMIZATION = True  # Scales BAM's friction budget per-env via FrictionDRBamActuator.friction_scale
-ENABLE_JOINT_DAMPING_RANDOMIZATION = False
 ENABLE_ARMATURE_RANDOMIZATION = True  # Reflected rotor inertia (microban-style). DOES affect BAM (armature is set, not zeroed).
 ENABLE_VELOCITY_PUSHES = True  # Velocity-based pushes for robustness training
 ENABLE_IMU_ORIENTATION_RANDOMIZATION = True  # Simulates mounting errors
 ENABLE_ENCODER_BIAS = True  # Per-env joint encoder calibration offset (actor obs sees joint_pos + bias)
-ENABLE_BASE_ORIENTATION_RANDOMIZATION = False  # Randomize initial tilt to force reactive behavior
 
-# Head/body pose command tracking (replaces the old neck-offset disturbance scheme).
-# Head pose: 4D deltas-from-HOME on neck/head joints; vel env tracks these as a
-# primary objective. Body pose: 6D delta in [x, y, z, roll, pitch, yaw]; vel env
-# samples small ranges + tiny reward weight so input neurons stay alive but
-# tracking isn't the priority (standup env raises the weight).
+# Head/body pose commands. Head pose: 4D deltas-from-HOME on neck/head joints,
+# tracked by head_pose_tracking. Body pose: 6D delta in [x, y, z, roll, pitch,
+# yaw], tracked by nothing: it keeps the actor's command slot (6 of its 61
+# numbers) alive. The Arena sends zeros in both.
 HEAD_POSE_CMD_RESAMPLE_S = (2.0, 5.0)
 BODY_POSE_CMD_RESAMPLE_S = (2.0, 5.0)
-
-# Observation configuration
-USE_PROJECTED_GRAVITY = True  # If True, use projected gravity instead of raw accelerometer
 
 # Domain randomization ranges (adjust as needed)
 # Conservative ranges proven to be stable - can increase gradually if needed
@@ -130,10 +119,7 @@ HEAD_BODY_NAMES = (
     "bearing_roll",
 )
 MASS_INERTIA_RANDOMIZATION_RANGE = (0.95, 1.05)  # ±5% applied to BOTH mass and inertia together.
-KP_RANDOMIZATION_RANGE = (0.85, 1.15)  # ±15%
-KD_RANDOMIZATION_RANGE = (0.9, 1.1)  # ±10% (can increase to 0.8-1.2)
 JOINT_FRICTION_RANDOMIZATION_RANGE = (0.9, 1.1)
-JOINT_DAMPING_RANDOMIZATION_RANGE = (0.9, 1.1)
 ARMATURE_RANDOMIZATION_RANGE = (0.9, 1.1)  # ±10% reflected rotor inertia (microban: dr.joint_armature, same range)
 VELOCITY_PUSH_INTERVAL_S = (3.0, 6.0)  # Apply pushes every 3-6 seconds
 VELOCITY_PUSH_RANGE = (-0.3, 0.3)  # Velocity change range in m/s. Was ±0.5 — an
@@ -142,8 +128,6 @@ VELOCITY_PUSH_RANGE = (-0.3, 0.3)  # Velocity change range in m/s. Was ±0.5 —
 # letting a calmer gait be optimal.
 IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0  # up-to-6° random-axis IMU mounting error. NOTE: zero-centered (random axis) — trains tolerance to misalignment *magnitude*, NOT a pitch bias. The real board's systematic ~5° pitch offset is corrected at the source in the runtime (imu-pitch-offset), not here.
 ENCODER_BIAS_RANGE = (-0.015, 0.015)  # ±0.86° per-joint encoder offset (constant per env)
-BASE_ORIENTATION_MAX_PITCH_DEG = 10.0  # ±10° forward/backward tilt at episode start
-BASE_ORIENTATION_MAX_ROLL_DEG = 5.0  # ±5° side-to-side tilt at episode start
 
 
 def course_boxes() -> list[tuple[str, tuple, tuple]]:
@@ -425,8 +409,8 @@ def make_env_cfg(
     # Body-specific configurations
     cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk_base",)
 
-    # foot_slip deliberately weak (-0.1, not -1.0): -1.0 was too restrictive
-    # for this robot's pivot-heavy turning.
+    # foot_slip weak (-0.1): under the winch's pull a planted foot may slide,
+    # and keeping its feet under it matters more than keeping them still.
     cfg.rewards["foot_slip"].weight = -0.1
     cfg.rewards["foot_slip"].params["command_threshold"] = 0.01
 
@@ -446,8 +430,8 @@ def make_env_cfg(
         params={"sensor_name": self_collision_cfg.name},
     )
 
-    # air_time window [0.125, 0.300] s, at 1.0: the sprint's knob, fixed here. The
-    # tug's command is never zero, so every env is a stepping env.
+    # air_time window [0.125, 0.300] s, a fixed 1.0 (no knob): it keeps the duck
+    # stepping backwards. The tug's command is never zero, so every env steps.
     cfg.rewards["air_time"].weight = 1.0
     cfg.rewards["air_time"].params["command_threshold"] = 0.01
     cfg.rewards["air_time"].params["threshold_min"] = 0.125
@@ -463,14 +447,14 @@ def make_env_cfg(
     cfg.rewards["track_angular_velocity"].weight = 2.0
     cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(0.5)
 
-    # Walk straight. The Arena commands yaw 0 and never tells the policy its
+    # Pull straight. The Arena commands yaw 0 and never tells the policy its
     # heading, and nothing above prices a slow drift: at this std a 0.07 rad/s
-    # turn keeps 99% of track_angular_velocity. Unpriced, the first reference
-    # turned right 3–8°/s from 0.35 m/s on the Arena and walked into the
-    # lane's right wall. heading_hold prices the yaw ANGLE against the spawn
-    # heading (the roller's term and std): the policy cannot see its heading,
-    # but it can learn to null its gait's mean yaw rate. The critic sees the
-    # heading error (heading_error, below) so it can value what this term pays.
+    # turn keeps 99% of track_angular_velocity. A duck that turns away from the
+    # string's line pulls across it and walks into the lane's walls.
+    # heading_hold prices the yaw ANGLE against the spawn heading (the roller's
+    # term and std): the policy cannot see its heading, but it can learn to
+    # null its gait's mean yaw rate. The critic sees the heading error
+    # (heading_error, below) so it can value what this term pays.
     cfg.rewards["heading_hold"] = RewardTermCfg(
         func=microduck_mdp.heading_hold_reward,
         weight=1.0,
@@ -613,22 +597,6 @@ def make_env_cfg(
             },
         )
 
-    if ENABLE_KP_RANDOMIZATION or ENABLE_KD_RANDOMIZATION:
-        # Randomize motor PD gains
-        # Uses custom function that handles DelayedActuator
-        kp_range = KP_RANDOMIZATION_RANGE if ENABLE_KP_RANDOMIZATION else (1.0, 1.0)
-        kd_range = KD_RANDOMIZATION_RANGE if ENABLE_KD_RANDOMIZATION else (1.0, 1.0)
-        cfg.events["randomize_motor_gains"] = EventTermCfg(
-            func=microduck_mdp.randomize_delayed_actuator_gains,
-            mode="reset",
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "operation": "scale",
-                "kp_range": kp_range,
-                "kd_range": kd_range,
-            },
-        )
-
     if ENABLE_MASS_INERTIA_RANDOMIZATION:
         # Physics-consistent mass + inertia randomization via mjlab's pseudo_inertia:
         # alpha scales BOTH mass and inertia by e^(2*alpha) with the CoM unchanged
@@ -662,21 +630,6 @@ def make_env_cfg(
             },
         )
 
-    if ENABLE_JOINT_DAMPING_RANDOMIZATION:
-        # Randomize joint damping (lubrication, temperature effects).
-        # Custom non-accumulating scaler. NOTE: no-op under BAM (dof_damping
-        # zeroed in edit_spec); only affects the XML position actuator.
-        cfg.events["randomize_joint_damping"] = EventTermCfg(
-            func=microduck_mdp.randomize_dof_field_scaled,
-            mode="reset",
-            domain_randomization=True,
-            params={
-                "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*",)),
-                "field": "dof_damping",  # required by domain_randomization=True
-                "scale_range": JOINT_DAMPING_RANDOMIZATION_RANGE,
-            },
-        )
-
     if ENABLE_ARMATURE_RANDOMIZATION:
         # Randomize reflected rotor inertia (armature), microban-exact
         # (dr.joint_armature, scale, ±10%). Non-accumulating (uses_defaults). DOES
@@ -695,18 +648,6 @@ def make_env_cfg(
     # level below (per-env constant rotation of projected_gravity + base_ang_vel).
     # The old event-based randomize_imu_orientation wrote site_quat, which under
     # mjlab 1.3.0 is neither per-env expanded nor read by these obs — a no-op.
-
-    # Base orientation randomization (forces reactive behavior)
-    if ENABLE_BASE_ORIENTATION_RANDOMIZATION:
-        cfg.events["randomize_base_orientation"] = EventTermCfg(
-            func=microduck_mdp.randomize_base_orientation,
-            mode="reset",
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "max_pitch_deg": BASE_ORIENTATION_MAX_PITCH_DEG,
-                "max_roll_deg": BASE_ORIENTATION_MAX_ROLL_DEG,
-            },
-        )
 
     # Observations
     del cfg.observations["actor"].terms["base_lin_vel"]
@@ -737,20 +678,9 @@ def make_env_cfg(
         params={"offset": STRING_OFFSET, "pit_edge_x": -PIT_M / 2},
     )
 
-    # Determine gravity/accelerometer term name based on flag
-    gravity_term_name = "projected_gravity" if USE_PROJECTED_GRAVITY else "raw_accelerometer"
-
-    # Replace projected_gravity with raw_accelerometer if flag is False
-    if not USE_PROJECTED_GRAVITY:
-        # Remove projected_gravity and add raw_accelerometer
-        del cfg.observations["actor"].terms["projected_gravity"]
-        cfg.observations["actor"].terms["raw_accelerometer"] = ObservationTermCfg(
-            func=microduck_mdp.raw_accelerometer,
-            scale=1.0,
-        )
-
-    cfg.observations["actor"].terms[gravity_term_name] = deepcopy(
-        cfg.observations["actor"].terms[gravity_term_name]
+    # Projected gravity, the slot the Arena feeds the policy.
+    cfg.observations["actor"].terms["projected_gravity"] = deepcopy(
+        cfg.observations["actor"].terms["projected_gravity"]
     )
     cfg.observations["actor"].terms["base_ang_vel"] = deepcopy(
         cfg.observations["actor"].terms["base_ang_vel"]
@@ -760,9 +690,9 @@ def make_env_cfg(
     cfg.observations["actor"].terms["base_ang_vel"].delay_max_lag = 1  # was 3 (=60 ms worst case); real dxl IMU path is fast — ±20 ms envelope (2026-07 audit)
     cfg.observations["actor"].terms["base_ang_vel"].delay_update_period = 64
 
-    cfg.observations["actor"].terms[gravity_term_name].delay_min_lag = 0
-    cfg.observations["actor"].terms[gravity_term_name].delay_max_lag = 1  # was 3 (=60 ms worst case); real dxl IMU path is fast — ±20 ms envelope (2026-07 audit)
-    cfg.observations["actor"].terms[gravity_term_name].delay_update_period = 64
+    cfg.observations["actor"].terms["projected_gravity"].delay_min_lag = 0
+    cfg.observations["actor"].terms["projected_gravity"].delay_max_lag = 1  # was 3 (=60 ms worst case); real dxl IMU path is fast — ±20 ms envelope (2026-07 audit)
+    cfg.observations["actor"].terms["projected_gravity"].delay_update_period = 64
 
     # The critic's sensor-derived terms are the one obs path `nan_state` cannot
     # protect (it checks joint + root state; these read contact sensor data,
@@ -778,7 +708,7 @@ def make_env_cfg(
 
     # Observation noise configuration (edit these values as needed)
     cfg.observations["actor"].terms["base_ang_vel"].noise = Unoise(n_min=-0.03, n_max=0.03) # was 0.2
-    cfg.observations["actor"].terms[gravity_term_name].noise = Unoise(n_min=-0.01, n_max=0.01)  # was 0.15
+    cfg.observations["actor"].terms["projected_gravity"].noise = Unoise(n_min=-0.01, n_max=0.01)  # was 0.15
     cfg.observations["actor"].terms["joint_pos"].noise = Unoise(n_min=-0.001, n_max=0.001)  # was 0.05
     cfg.observations["actor"].terms["joint_vel"].noise = Unoise(n_min=-0.25, n_max=0.25)  # was 2.0
 
@@ -789,10 +719,9 @@ def make_env_cfg(
         av = cfg.observations["actor"].terms["base_ang_vel"]
         av.func = microduck_mdp.base_ang_vel_imu_misaligned
         av.params = {"max_angle_deg": IMU_ORIENTATION_RANDOMIZATION_ANGLE}
-        if USE_PROJECTED_GRAVITY:
-            g = cfg.observations["actor"].terms[gravity_term_name]
-            g.func = microduck_mdp.projected_gravity_imu_misaligned
-            g.params = {"max_angle_deg": IMU_ORIENTATION_RANDOMIZATION_ANGLE}
+        g = cfg.observations["actor"].terms["projected_gravity"]
+        g.func = microduck_mdp.projected_gravity_imu_misaligned
+        g.params = {"max_angle_deg": IMU_ORIENTATION_RANDOMIZATION_ANGLE}
 
     # 1-ctrl-step lag on joint_vel: the Dynamixel firmware computes
     # present_velocity via a moving-average over the previous position-sample
@@ -824,18 +753,12 @@ def make_env_cfg(
         cfg.events["encoder_bias"].params["bias_range"] = ENCODER_BIAS_RANGE
         cfg.observations["actor"].terms["joint_pos"].params["biased"] = True
         cfg.observations["critic"].terms["joint_pos"].params["biased"] = False
-    else:
-        cfg.events.pop("encoder_bias", None)
 
-    # Commands — deepcopy to avoid shared-state corruption from other env cfgs
-    # (make_velocity_env_cfg() returns objects with shared mutable references;
-    # standup/ground_pick envs mutate commands["twist"] in place, zeroing ranges)
-    command: UniformVelocityCommandCfg = deepcopy(cfg.commands["twist"])
-    cfg.commands["twist"] = command
-    # The event's own command (arena/events/tug-of-war.toml [command], D6):
-    # walk backwards at COMMAND_VX, never sideways or turning, in every env.
-    # No standing envs (the Arena never sends a zero twist here), and none of the
-    # template's forward envs, which would turn the command into +0.30 m/s.
+    # Commands. The twist is the event's own command (arena/events/tug-of-war.toml
+    # [command], D6): walk backwards at COMMAND_VX, never sideways or turning, in
+    # every env. No standing envs (the Arena never sends a zero twist here), and
+    # none of the template's forward envs, which would turn it into +0.30 m/s.
+    command: UniformVelocityCommandCfg = cfg.commands["twist"]
     command.rel_standing_envs = 0.0
     command.rel_forward_envs = 0.0
     command.rel_heading_envs = 0.0
@@ -846,8 +769,8 @@ def make_env_cfg(
     cfg.commands["twist"] = microduck_mdp.VelocityCommandCommandOnlyCfg(**vars(command))
 
     # Head pose command (4D deltas from HOME, in joint order:
-    #   neck_pitch, head_pitch, head_yaw, head_roll). Tracked as a primary
-    # reward — see "head_pose_tracking" added below. Ranges are small non-zero
+    #   neck_pitch, head_pitch, head_yaw, head_roll). Tracked by
+    # head_pose_tracking, added below. Ranges are small non-zero
     # (not zero) so the input neurons stay alive, and held there for the whole
     # run — the Arena commands no head motion, so there is no widening
     # curriculum here (the head stays still).
@@ -861,9 +784,8 @@ def make_env_cfg(
         ),
     )
     # Body pose command (6D delta from nominal standing: [x, y, z, roll, pitch, yaw]).
-    # Vel env carries this slot for runtime obs-shape parity; tracked at a tiny
-    # weight to keep the input neurons alive but not steer the policy. The
-    # standup env raises the weight + widens the ranges.
+    # It fills 6 of the actor's 61 numbers, where the Arena sends zeros. Small
+    # non-zero ranges keep those input neurons alive; nothing rewards tracking it.
     cfg.commands["body_pose"] = microduck_mdp.UniformPoseCommandCfg(
         resampling_time_range=BODY_POSE_CMD_RESAMPLE_S,
         ranges=(
@@ -894,7 +816,7 @@ def make_env_cfg(
         )
 
     # === Pose tracking rewards ===
-    # head_pose: primary objective in vel env — the whole point of the rewrite.
+    # head_pose: hold the head on its command (the Arena's is zero).
     # std=0.5 with per-joint Gaussian (see head_pose_tracking in mdp.py). Final
     # reward is the mean over 4 joints, so partial tracking is partial reward
     # (no all-or-nothing).
@@ -903,20 +825,6 @@ def make_env_cfg(
         weight=2.0,
         params={"command_name": "head_pose", "std": 0.5},
     )
-    # body_pose: infra kept intact but DISABLED (weight 0) — the obs slot and
-    # command stay alive for envs that raise the weight (standup).
-    cfg.rewards["body_pose_tracking"] = RewardTermCfg(
-        func=microduck_mdp.body_pose_tracking_6d,
-        weight=0.0,
-        params={
-            "command_name": "body_pose",
-            "nominal_height": 0.095,
-            "xy_std": 0.05,
-            "z_std": 0.02,
-            "angle_std": math.radians(15),
-        },
-    )
-
     # Head droop fix (2026-08-20). The head walks pitched ~15° down (measured:
     # run ww1g2198 head_pose_tracking 1.544/2.0 → 14.6° mean joint error).
     # DO NOT fix this by tightening head_pose_tracking's std: run 5yay13u4 tried
@@ -974,25 +882,6 @@ def make_env_cfg(
         },
     )
 
-    # Body pose command range curriculum: stay small in vel env. Standup env
-    # overrides this curriculum with wide ranges + heavy reward weight.
-    cfg.curriculum["body_pose_range"] = CurriculumTermCfg(
-        func=microduck_mdp.pose_command_range_curriculum,
-        params={
-            "command_name": "body_pose",
-            "range_stages": [
-                {"step": 0, "ranges": (
-                    (-0.005, 0.005),  # x (m)
-                    (-0.005, 0.005),  # y (m)
-                    (-0.005, 0.005),  # z (m)
-                    (-0.05, 0.05),    # roll
-                    (-0.05, 0.05),    # pitch
-                    (-0.05, 0.05),    # yaw
-                )},
-            ],
-        },
-    )
-
     # CoM randomization range curriculum - start small, ramp up
     if ENABLE_COM_RANDOMIZATION:
         cfg.curriculum["com_range"] = CurriculumTermCfg(
@@ -1006,10 +895,10 @@ def make_env_cfg(
                     # support, forcing a wide/fast hyper-reactive gait and making
                     # BACKWARD balance untrainable. Regression timeline matched the
                     # ramp increases: 0.015 → 0.02 → 0.03 as policies got worse.
-                    {"step": 0,          "range": 0.003},
-                    {"step": 500 * 24,  "range": 0.005},
-                    {"step": 1000 * 24,  "range": 0.01},
-                    {"step": 1500 * 24,  "range": 0.015},
+                    {"step": 0, "range": 0.003},
+                    {"step": 500 * NUM_STEPS_PER_ENV, "range": 0.005},
+                    {"step": 1000 * NUM_STEPS_PER_ENV, "range": 0.01},
+                    {"step": 1500 * NUM_STEPS_PER_ENV, "range": 0.015},
                 ],
             },
         )
@@ -1023,9 +912,9 @@ def make_env_cfg(
                 "range_stages": [
                     # Capped at ±10 mm (2026-07 audit — same over-conservatism
                     # concern as trunk CoM; head is a large lever arm).
-                    {"step": 0,          "range": 0.003},
-                    {"step": 500 * 24,  "range": 0.005},
-                    {"step": 1000 * 24,  "range": 0.01},
+                    {"step": 0, "range": 0.003},
+                    {"step": 500 * NUM_STEPS_PER_ENV, "range": 0.005},
+                    {"step": 1000 * NUM_STEPS_PER_ENV, "range": 0.01},
                 ],
             },
         )
@@ -1083,7 +972,6 @@ RL_CFG = RslRlOnPolicyRunnerCfg(
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
-        symmetry_cfg=SYMMETRY_CFG if ENABLE_SYMMETRY else None,
     ),
     wandb_project="mjlab_microduck",
     experiment_name="tug_of_war",  # logs/rsl_rl/tug_of_war/
