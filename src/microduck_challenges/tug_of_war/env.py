@@ -1,9 +1,11 @@
 """The Tug of War's training environment: the 2 m Sprint's recipe made the tug's.
 
-The duck trains on the Arena's tug: a lane cut by a pit, the west duck's start, a string end at
-the base of its neck. It is alone on the lane for a bout's length. The HF job installs no Arena,
-so the event's numbers and the course's arithmetic (arena/course.py) are copied here;
-tests/test_tug_of_war.py pins each copy against the Arena's own model.
+The duck trains in the Arena's bout: a lane cut by a pit, two ducks tied neck to neck by a 1 m
+string, for a bout's length. The learner (`robot`) is always the west duck; the `opponent` is the
+east one, turned half a way about the pit's vertical axis (Plan F, Decision 1: the east side is
+the same bout turned). The HF job installs no Arena, so the event's numbers and the course's
+arithmetic (arena/course.py, compile_tug) are copied here; tests/test_tug_of_war.py pins each
+copy against the Arena's own model.
 
 `make_env_cfg` is the sprint's recipe (sprint_2m/env.py), the shortest way to a duck that steps
 backwards, with the three rewards a novice tunes read from challenge.toml ([params]). Everything
@@ -14,7 +16,10 @@ decisions, each commented where it is made:
   D1  no mjlab terrain: `tug_scene` builds the course and every env origin is 0, so each world
       holds it at the Arena's coordinates (no mjlab terrain has a pit)
   D2  the course body is named `terrain`, as the foot contact sensor expects
-  D3  `tug_scene` adds the string's site, so the robot cfg stays untouched
+  D3  `tug_scene` adds both ducks' string sites and the limited string, so the robot cfg stays
+      untouched
+  D4  two entities, `robot` and `opponent`, both the standup robot: `compile_tug`'s bout. The
+      string is a tendon limited to [0, STRING_M]: slack up to its length, never stretched
   D5  the Arena's numbers are copied below, pinned by the parity tests
   D6  the twist is the event's fixed command, -0.30 m/s backwards, in every env
   D7  the Arena's collision set (the standup robot: a dragged duck touches with its body) and
@@ -26,6 +31,9 @@ decisions, each commented where it is made:
       pit. Without it an untrained duck falls at 1 s and lies on its side for the rest of the
       episode, collecting the pit margin, and never learns to stand (t2, t3)
   D11 an episode is the settle plus a bout: `BOUT_S`
+  D12 the starts: west x [west_x, west_x + 2 cm], east x [east_x - 2 cm, east_x], y ±1 cm, yaw
+      ±5° (east 180° ± 5°): never farther apart than the Arena's taut start, since a stretched
+      start jerks both ducks. The opponent has no action term yet, so it only stands there
   D13 the critic alone reads the pit margin; the actor reads the Arena's 61 numbers
   D14 `retreat` pays the new ground the string end wins away from the pit (not its backward
       speed, which a sway earns with no net gain)
@@ -79,7 +87,10 @@ STRING_OFFSET = (0.026, 0.0145, 0.0324215)                 # string_offset("legs
 PIT_DROP_M = 0.05                                          # arena/tug.py
 STRING_SITE = "string_end"
 
-ROBOT = "robot/"  # the prefix mjlab attaches the robot entity under
+STRING = "string"  # the spatial tendon, as arena.course.STRING
+
+ROBOT = "robot/"  # the prefix mjlab attaches the learner entity under
+OPPONENT = "opponent/"  # and the opponent's
 
 # The sprint's recipe switches and ranges (sprint_2m/env.py), the ones it uses.
 NUM_STEPS_PER_ENV = 24
@@ -163,16 +174,31 @@ def west_start() -> tuple[float, float]:
     return -half - ox, -oy
 
 
-def tug_scene(spec: mujoco.MjSpec) -> None:
-    """mjlab's `SceneCfg.spec_fn`: the Arena's course, built on the scene once the robot is in.
+def east_start() -> tuple[float, float]:
+    """The east duck's trunk (x, y), facing west: the west start turned half a way about the
+    pit's vertical axis."""
+    x, y = west_start()
+    return -x, -y
 
-    The course is a static body named `terrain`, as mjlab's foot contact sensor expects. The
-    string end is a site at the base of the neck.
+
+def tug_scene(spec: mujoco.MjSpec) -> None:
+    """mjlab's `SceneCfg.spec_fn`: the Arena's bout, built on the scene once both ducks are in
+    (`arena.course.compile_tug`, Plan F Decisions 1 and 2).
+
+    The course is a static body named `terrain`, as mjlab's foot contact sensor expects. Each
+    duck, `robot` and `opponent`, carries a string end, a site at the base of its neck, and the
+    tendon `string` ties the two, limited to [0, STRING_M].
     """
     terrain = spec.worldbody.add_body(name="terrain")
     for name, pos, size in course_boxes():
         terrain.add_geom(name=name, type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size)
-    spec.body(ROBOT + "trunk_base").add_site(name=ROBOT + STRING_SITE, pos=STRING_OFFSET)
+    for prefix in (ROBOT, OPPONENT):
+        spec.body(prefix + "trunk_base").add_site(name=prefix + STRING_SITE, pos=STRING_OFFSET)
+    string = spec.add_tendon(name=STRING)
+    string.wrap_site(ROBOT + STRING_SITE)
+    string.limited = True
+    string.range = [0.0, STRING_M]
+    string.wrap_site(OPPONENT + STRING_SITE)
 
 
 def heading_error(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -256,20 +282,22 @@ def make_env_cfg(
 
     # Robot setup: the standup robot, the Arena's collision set (D7): a duck
     # dragged towards the pit touches the ground with its body, not only its feet.
-    cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
+    # The learner and the opponent (D4); every sensor, term and event below names
+    # `robot`, and the opponent stands where it starts until it is driven.
+    cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG, "opponent": MICRODUCK_STANDUP_ROBOT_CFG}
     cfg.scene.sensors = (feet_ground_cfg, self_collision_cfg)
     cfg.viewer.body_name = "trunk_base"
 
-    # The course is the Arena's tug, built on the scene by tug_scene (D1–D3): no
-    # mjlab terrain has a pit, and without one every env origin is 0, so each
-    # world holds the course and the string end at the Arena's coordinates.
+    # The course and the string are the Arena's tug, built on the scene by tug_scene
+    # (D1–D4): no mjlab terrain has a pit, and without one every env origin is 0, so
+    # each world holds the course and the string ends at the Arena's coordinates.
     cfg.scene.terrain = None
     cfg.scene.spec_fn = tug_scene
 
     # The Arena's solver (D7, arena/course.py): implicitfast, 10/20 iterations,
     # 0.005 s physics steps, 4 per 0.02 s control step. nconmax is a contact
-    # buffer, not physics: 200 keeps a duck lying on the platform from overflowing it.
-    cfg.sim.nconmax = 200
+    # buffer, not physics: 400 keeps two ducks lying on the platform from overflowing it.
+    cfg.sim.nconmax = 400
     cfg.sim.mujoco.integrator = "implicitfast"
     cfg.sim.mujoco.timestep = 0.005
     cfg.sim.mujoco.iterations = 10
@@ -444,22 +472,48 @@ def make_env_cfg(
     ].geom_names = foot_frictions_geom_names
     cfg.events["foot_friction"].params["ranges"] = (0.7, 1.3)  # Grippier footpad — narrowed from (0.3, 1.2)
 
-    # The start is the Arena's west duck (arena.course.tug_layout): facing east,
-    # its string end on y = 0, half the string west of the pit's centre, the
-    # ±2 cm and ±5° (the Arena perturbs its yaw by ±YAW_PERTURBATION_DEG)
-    # instead of the template's ±0.5 m and ±π, which would start ducks over the
-    # pit or facing away from the lane. The joints
-    # get the Arena's perturbation.
+    # The starts are the Arena's (arena.course.tug_layout, D12): the west duck
+    # faces east, the east duck west, each with its string end on y = 0, the two
+    # STRING_M apart and centred on the pit. The offsets only ever bring them closer
+    # (west x up to +2 cm, east x down to -2 cm), the ±1 cm and ±5° (the Arena
+    # perturbs its yaw by ±YAW_PERTURBATION_DEG) instead of the template's ±0.5 m and
+    # ±π, which would start ducks over the pit or facing away from the lane. The
+    # joints get the Arena's perturbation.
     west_x, west_y = west_start()
+    east_x, east_y = east_start()
+    yaw = math.radians(5.0)
     cfg.events["reset_base"].params["pose_range"] = {
-        "x": (west_x - 0.02, west_x + 0.02),
-        "y": (west_y - 0.02, west_y + 0.02),
+        "x": (west_x, west_x + 0.02),
+        "y": (west_y - 0.01, west_y + 0.01),
         "z": (0.12, 0.13),
-        "yaw": (-math.radians(5.0), math.radians(5.0)),
+        "yaw": (-yaw, yaw),
     }
+    cfg.events["reset_opponent_base"] = EventTermCfg(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {
+                "x": (east_x - 0.02, east_x),
+                "y": (east_y - 0.01, east_y + 0.01),
+                "z": (0.12, 0.13),
+                "yaw": (math.pi - yaw, math.pi + yaw),
+            },
+            "velocity_range": {},
+            "asset_cfg": SceneEntityCfg("opponent"),
+        },
+    )
     cfg.events["reset_robot_joints"].params["position_range"] = (
         -JOINT_PERTURBATION_RAD,
         JOINT_PERTURBATION_RAD,
+    )
+    cfg.events["reset_opponent_joints"] = EventTermCfg(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (-JOINT_PERTURBATION_RAD, JOINT_PERTURBATION_RAD),
+            "velocity_range": (0.0, 0.0),
+            "asset_cfg": SceneEntityCfg("opponent", joint_names=(".*",)),
+        },
     )
 
     # Velocity-based pushes for robustness training

@@ -1,5 +1,5 @@
 """The Tug of War trains in the Arena's tug: the same course, string end, start and command."""
-import math, subprocess, sys, tomllib
+import itertools, math, subprocess, sys, tomllib
 from pathlib import Path
 from types import SimpleNamespace
 import mujoco, numpy as np, pytest, torch
@@ -11,12 +11,15 @@ from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CF
 import microduck_challenges  # noqa: F401
 from arena import course as arena_course, tug as arena_tug
 from arena.assets import ASSET_ROOT
+from arena.constants import DEFAULT_POSE, JOINT_NAMES
 from arena.manifest import load_event
 from microduck_challenges.tug_of_war import env as tug, rewards
 
 EVENT = load_event("tug-of-war")
 CONTACT = ("geom_type", "geom_size", "geom_contype", "geom_conaffinity", "geom_condim", "geom_priority",
            "geom_friction", "geom_solref", "geom_solimp", "geom_solmix", "geom_margin", "geom_gap")
+TENDON = ("tendon_limited", "tendon_range", "tendon_solref_lim", "tendon_solimp_lim", "tendon_margin",
+          "tendon_stiffness", "tendon_damping", "tendon_frictionloss")
 
 
 @pytest.fixture(scope="module")
@@ -26,7 +29,8 @@ def arena_model():
 
 @pytest.fixture(scope="module")
 def training_model():
-    scene = SceneCfg(num_envs=1, entities={"robot": MICRODUCK_STANDUP_ROBOT_CFG}, spec_fn=tug.tug_scene)
+    scene = SceneCfg(num_envs=1, entities={"robot": MICRODUCK_STANDUP_ROBOT_CFG, "opponent": MICRODUCK_STANDUP_ROBOT_CFG},
+                     spec_fn=tug.tug_scene)
     return Scene(scene, device="cpu").compile()
 
 
@@ -101,7 +105,7 @@ def test_no_env_is_sent_forward(cfg):
 
 def test_the_start_is_the_arenas(cfg):
     pose, west = cfg.events["reset_base"].params["pose_range"], arena_course.tug_layout(EVENT.course)[0]
-    assert sum(pose["x"]) / 2 == pytest.approx(west.x) and sum(pose["y"]) / 2 == pytest.approx(west.y)
+    assert pose["x"][0] == pytest.approx(west.x) and sum(pose["y"]) / 2 == pytest.approx(west.y)
     assert pose["z"][0] <= arena_course.SPAWN_HEIGHT_M <= pose["z"][1]
     yaw = np.radians(EVENT.start.yaw_deg)
     assert pose["yaw"][0] <= -yaw and yaw <= pose["yaw"][1] <= 0.1  # not the template's ±π
@@ -195,7 +199,66 @@ def test_the_recipe_knows_no_winch(cfg, training_model):
     assert "hold" not in cfg.rewards
     assert "winch" not in cfg.commands and "winch_top" not in cfg.curriculum
     assert not {"winch_pull", "winch_top"} & set(cfg.observations["critic"].terms)
-    assert training_model.nu == 14 and training_model.ntendon == 0
+    
+
+def _bout_data(model, prefixes, gap):
+    """Both ducks in DEFAULT_POSE at their bout starts, each moved gap / 2 away from the pit, mj_forward."""
+    data = mujoco.MjData(model)
+    for prefix, start in zip(prefixes, arena_course.tug_layout(EVENT.course)):
+        x = start.x + math.copysign(1.0, start.x) * gap / 2
+        trunk = model.body(prefix + "trunk_base")
+        free = model.jnt_qposadr[trunk.jntadr[0]]
+        half = math.radians(start.yaw_deg) / 2
+        data.qpos[free:free + 7] = [x, start.y, arena_course.SPAWN_HEIGHT_M, math.cos(half), 0, 0, math.sin(half)]
+        for name, angle in zip(JOINT_NAMES, DEFAULT_POSE):
+            data.qpos[model.joint(prefix + name).qposadr[0]] = angle
+    mujoco.mj_forward(model, data)
+    return data
+
+
+def _ends_apart(west_x, west_y, west_yaw, east_x, east_y, east_yaw):
+    """The string ends' distance for trunks at these (x, y, yaw): STRING_OFFSET turned by each yaw."""
+    ends = [(x + tug.STRING_OFFSET[0] * math.cos(yaw) - tug.STRING_OFFSET[1] * math.sin(yaw),
+             y + tug.STRING_OFFSET[0] * math.sin(yaw) + tug.STRING_OFFSET[1] * math.cos(yaw))
+            for x, y, yaw in ((west_x, west_y, west_yaw), (east_x, east_y, east_yaw))]
+    return math.dist(*ends)
+
+
+def test_the_string_is_tied_like_the_arenas(arena_model, training_model):
+    a, t = arena_model.tendon(tug.STRING).id, training_model.tendon(tug.STRING).id
+    for field in TENDON:
+        np.testing.assert_allclose(getattr(training_model, field)[t], getattr(arena_model, field)[a], err_msg=field)
+    for ours, theirs in (("robot/", ""), ("opponent/", "duck1/")):
+        site, arena_site = training_model.site(ours + tug.STRING_SITE), arena_model.site(theirs + tug.STRING_SITE)
+        assert training_model.body(site.bodyid[0]).name == ours + "trunk_base"
+        np.testing.assert_allclose(site.pos, arena_site.pos, atol=1e-12)
+    assert training_model.nu == arena_model.nu == 28   # two ducks' servos, nothing else
+
+
+@pytest.mark.parametrize("gap, held", [(-0.01, False), (0.01, True)])
+def test_the_string_holds_at_its_length(arena_model, training_model, gap, held):
+    for model, prefixes in ((arena_model, ("", "duck1/")), (training_model, ("robot/", "opponent/"))):
+        data = _bout_data(model, prefixes, gap)
+        assert data.ten_length[model.tendon(tug.STRING).id] == pytest.approx(tug.STRING_M + gap, abs=1e-6)
+        assert bool((data.efc_type[:data.nefc] == mujoco.mjtConstraint.mjCNSTR_LIMIT_TENDON).any()) is held
+
+
+def test_the_bout_is_the_same_from_either_side():
+    boxes = {(tuple(round(v, 9) for v in pos), tuple(size)) for _, pos, size in tug.course_boxes()}
+    assert {((round(-x, 9), round(-y, 9), z), size) for (x, y, z), size in boxes} == boxes
+    west, east = arena_course.tug_layout(EVENT.course)
+    assert (east.x, east.y, east.yaw_deg) == pytest.approx((-west.x, -west.y, 180.0))
+    assert tug.east_start() == pytest.approx((east.x, east.y)) and tug.west_start() == pytest.approx((west.x, west.y))
+
+
+def test_no_start_stretches_the_string(cfg):
+    """No corner of the start ranges puts the ends more than 5 mm past the string (the Arena's ±2° alone gives ~1 mm)."""
+    west, east = cfg.events["reset_base"].params["pose_range"], cfg.events["reset_opponent_base"].params["pose_range"]
+    corners = itertools.product(west["x"], west["y"], west["yaw"], east["x"], east["y"], east["yaw"])
+    assert max(_ends_apart(*corner) for corner in corners) <= tug.STRING_M + 0.005   # STRING_OFFSET turned by each yaw
+    assert west["x"][0] == pytest.approx(tug.west_start()[0]) and east["x"][1] == pytest.approx(tug.east_start()[0])
+    yaw = math.radians(EVENT.start.yaw_deg)
+    assert east["yaw"][0] <= math.pi - yaw and math.pi + yaw <= east["yaw"][1]
 
 
 def test_the_string_end_is_where_the_arena_judges_it():
