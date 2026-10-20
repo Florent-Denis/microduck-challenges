@@ -199,7 +199,7 @@ def test_the_recipe_knows_no_winch(cfg, training_model):
     assert "hold" not in cfg.rewards
     assert "winch" not in cfg.commands and "winch_top" not in cfg.curriculum
     assert not {"winch_pull", "winch_top"} & set(cfg.observations["critic"].terms)
-    
+
 
 def _bout_data(model, prefixes, gap):
     """Both ducks in DEFAULT_POSE at their bout starts, each moved gap / 2 away from the pit, mj_forward."""

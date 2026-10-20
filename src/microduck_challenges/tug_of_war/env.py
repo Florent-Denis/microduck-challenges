@@ -33,7 +33,7 @@ decisions, each commented where it is made:
   D11 an episode is the settle plus a bout: `BOUT_S`
   D12 the starts: west x [west_x, west_x + 2 cm], east x [east_x - 2 cm, east_x], y ±1 cm, yaw
       ±5° (east 180° ± 5°): never farther apart than the Arena's taut start, since a stretched
-      start jerks both ducks. The opponent has no action term yet, so it only stands there
+      start jerks both ducks. The opponent has no action term yet: its servo targets stay 0, limp
   D13 the critic alone reads the pit margin; the actor reads the Arena's 61 numbers
   D14 `retreat` pays the new ground the string end wins away from the pit (not its backward
       speed, which a sway earns with no net gain)
@@ -283,7 +283,7 @@ def make_env_cfg(
     # Robot setup: the standup robot, the Arena's collision set (D7): a duck
     # dragged towards the pit touches the ground with its body, not only its feet.
     # The learner and the opponent (D4); every sensor, term and event below names
-    # `robot`, and the opponent stands where it starts until it is driven.
+    # `robot`; until an action term drives the opponent its servo targets stay 0 (limp).
     cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG, "opponent": MICRODUCK_STANDUP_ROBOT_CFG}
     cfg.scene.sensors = (feet_ground_cfg, self_collision_cfg)
     cfg.viewer.body_name = "trunk_base"
