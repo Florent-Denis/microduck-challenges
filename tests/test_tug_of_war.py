@@ -49,6 +49,8 @@ def test_the_constants_are_the_arenas():
     assert tuple(EVENT.command) == (tug.COMMAND_VX,) + (0.0,) * 12
     assert (tug.TIME_LIMIT_S, tug.SETTLE_S, tug.JOINT_PERTURBATION_RAD, tug.YAW_PERTURBATION_DEG) == (
         EVENT.time_limit_s, s.settle_s, s.joint_rad, s.yaw_deg)
+    # The Arena's fall rule, summaries only there: the training ends an episode on it.
+    assert (tug.FALL_GRAVITY_Z, tug.FALL_HOLD_S) == (EVENT.termination.fall_gravity_z, EVENT.termination.fall_hold_s)
     assert tug.STRING_OFFSET == pytest.approx(arena_course.string_offset("legs"), abs=1e-12)
     assert (tug.SPAWN_HEIGHT_M, tug.WALL_THICKNESS_M, tug.PLATFORM_OVERRUN_M, tug.PIT_DROP_M) == (
         arena_course.SPAWN_HEIGHT_M, arena_course.WALL_THICKNESS_M, arena_course.PLATFORM_OVERRUN_M, arena_tug.PIT_DROP_M)
@@ -237,11 +239,28 @@ def test_the_winch_top_widens_on_training_iterations(cfg):
     assert [s["step"] for s in stages] == [i * tug.RL_CFG.num_steps_per_env for i in (0, 500, 1000, 1500)]
 
 
-def test_the_pit_alone_ends_an_episode(cfg):
-    """Only the pit decides, as on the Arena: a duck that goes down stays in play and can be dragged in."""
-    assert set(cfg.terminations) == {"time_out", "nan_state", "in_pit"}
+def test_the_pit_and_a_training_fall_end_an_episode(cfg):
+    """The pit, as on the Arena; and a fall, training only (the Arena judges only the pit), so the duck
+    keeps learning to stand and pull instead of lying on its side for the rest of the episode."""
+    assert set(cfg.terminations) == {"time_out", "nan_state", "in_pit", "fell"}
     assert cfg.terminations["in_pit"].params["minimum_height"] == -arena_tug.PIT_DROP_M
+    assert cfg.terminations["fell"].func is rewards.ArenaFall
+    assert cfg.terminations["fell"].params == {"fall_gravity_z": EVENT.termination.fall_gravity_z,
+                                               "hold_steps": round(EVENT.termination.fall_hold_s / 0.02)}
     assert cfg.rewards["out"].weight == -50.0
+
+
+def test_a_fall_is_the_arenas_rule(cfg):
+    """Gravity z above fall_gravity_z for the hold's straight control steps, as arena.stage.fell_at counts it."""
+    params = cfg.terminations["fell"].params
+    gravity = torch.tensor([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0]])   # env 0 upright, env 1 on its side
+    env = SimpleNamespace(num_envs=2, device="cpu",
+                          scene={"robot": SimpleNamespace(data=SimpleNamespace(projected_gravity_b=gravity))})
+    term = rewards.ArenaFall(cfg.terminations["fell"], env)
+    seen = [term(env, **params).tolist() for _ in range(params["hold_steps"])]
+    assert seen[-2:] == [[False, False], [False, True]]   # out on the step that completes the hold
+    term.reset(torch.tensor([1]))
+    assert term(env, **params).tolist() == [False, False]
 
 
 def test_hold_pays_the_pull_whatever_the_posture():
