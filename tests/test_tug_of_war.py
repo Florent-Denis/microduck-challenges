@@ -107,3 +107,50 @@ def test_the_winch_pulls_like_the_arenas(arena_model, training_model, yaw_deg, p
         np.testing.assert_allclose(t, a, atol=1e-9)
     force = ours[3][:3]
     assert np.linalg.norm(force) == pytest.approx(3.0, rel=1e-6) and force[0] > 0  # 3 N, towards the drum
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 4, 5])
+def test_the_pull_is_the_benchs(seed):
+    profile = arena_tug.bench_profile(EVENT.bench, EVENT.id, seed)
+    row = [profile["ramp_n_per_s"], profile["top_n"], *[v for jerk in profile["jerks"] for v in jerk]]
+    t = torch.linspace(0.0, EVENT.time_limit_s, 1501, dtype=torch.float64)
+    ours = tug.bench_force(torch.tensor([row] * len(t), dtype=torch.float64), t)
+    assert ours.tolist() == pytest.approx([arena_tug.bench_force(profile, s) for s in t.tolist()], abs=1e-9)
+    settle = torch.tensor([-tug.SETTLE_S, -0.02], dtype=torch.float64)
+    assert tug.bench_force(torch.tensor([row] * 2, dtype=torch.float64), settle).tolist() == [0.0, 0.0]
+
+
+def test_training_pulls_around_the_bench():
+    cfg = tug.WinchCommandCfg()
+    assert cfg.ramp_n_per_s[0] <= tug.BENCH_RAMP_N_PER_S <= cfg.ramp_n_per_s[1]
+    assert cfg.jerk_n[0] <= tug.BENCH_JERK_N <= cfg.jerk_n[1]
+    assert cfg.hz_scale[0] <= 1.0 <= cfg.hz_scale[1] and cfg.jerk_hz == tug.BENCH_JERK_HZ
+
+
+def test_the_winch_pulls_its_profile_on_the_arenas_clock(training_model):
+    n = 64
+    ctrl = torch.zeros(n, training_model.nu, dtype=torch.float64)
+    env = SimpleNamespace(num_envs=n, device="cpu", step_dt=0.02, episode_length_buf=torch.zeros(n, dtype=torch.long),
+                          sim=SimpleNamespace(mj_model=training_model, data=SimpleNamespace(ctrl=ctrl)))
+    term = tug.WinchCommandCfg().build(env)
+    term.reset(torch.arange(n))
+    p = term.profile
+    assert ((p[:, 0] >= 0.125) & (p[:, 0] <= 0.75) & (p[:, 1] >= 0.5) & (p[:, 1] <= 2.0)).all()
+    winch = training_model.actuator(tug.WINCH).id
+    for k in (0, 24, 25, 26, 500, 1524):
+        env.episode_length_buf[:] = k
+        term.compute(0.02)
+        expected = tug.bench_force(p, torch.full((n,), k * 0.02 - tug.SETTLE_S, dtype=p.dtype))
+        assert torch.allclose(ctrl[:, winch], expected.to(ctrl.dtype))
+        assert torch.allclose(term.command[:, 0], (expected / tug.BENCH_TOP_N).to(term.command.dtype))
+    assert not ctrl[:, [i for i in range(training_model.nu) if i != winch]].any()  # servos untouched
+
+
+def test_the_winch_top_widens_stage_by_stage():
+    term = SimpleNamespace(cfg=tug.WinchCommandCfg())
+    env = SimpleNamespace(common_step_counter=0, command_manager=SimpleNamespace(get_term={"winch": term}.get))
+    stages = [{"step": 0, "top_n": (0.5, 2.0)}, {"step": 100, "top_n": (0.5, 4.0)}]
+    for step, top in ((0, (0.5, 2.0)), (99, (0.5, 2.0)), (100, (0.5, 4.0))):
+        env.common_step_counter = step
+        tug.winch_top_curriculum(env, None, stages)
+        assert term.cfg.top_n == top
