@@ -204,7 +204,20 @@ fork, never `pollen-robotics`; the workshop's home sets that up).
 
 ## What is known about this challenge
 
-To be filled after the first trainings.
+All numbers are from the Mac, indicative: the Space (x86) rates differently.
+
+- Baselines: the zero policy rates 0.326 N, the vendored walker 0.887 N.
+- First training (run `t1`, the recipe as written, commit `5bd4d57` on branch `tug-of-war`, seed 1, 3000
+  iterations), rating per checkpoint in N: 0: 0.56, 250: 5.69, 500: 5.78, 750: 5.57, 1000: 6.01,
+  1250: 6.03, 1500: 5.38, 1750: 6.03, 2000: 6.07, 2250: 6.32, 2500: 5.86, 2750: 6.09, 2999: 6.09.
+  Twelve trained checkpoints sit between 5.38 and 6.32 N: the rating plateaus near 6 N from iteration 250 on.
+- Bouts among the five best-rated checkpoints (6 bouts per pair, wins out of 24 each): 2750: 23, 2999: 19,
+  1750: 11, 2250: 7, 2000: 0. The best rating (2250) is not the best fighter; 2750 beats every other of the
+  five except 2999 (5 of 6).
+- In bouts between trained policies both hold for the full 20 s: no pit, no fall, every bout is decided
+  by the marker at 20.00 s.
+- On the bench the policy leans far back and goes out by a fall, not by the pit: all five seeds of every
+  trained checkpoint but 500 end in a fall at 22.5 to 24.3 s, about 6 N into the ramp.
 
 ## The competition
 
