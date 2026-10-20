@@ -9,6 +9,7 @@ from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CF
 
 import microduck_challenges  # noqa: F401
 from arena import course as arena_course, tug as arena_tug
+from arena.assets import ASSET_ROOT
 from arena.constants import DEFAULT_POSE, JOINT_NAMES
 from arena.manifest import load_event
 from microduck_challenges.tug_of_war import env as tug, rewards
@@ -285,3 +286,36 @@ def test_a_trunk_in_the_pit_ends_the_episode(live):
     live.sim.forward()
     _, _, terminated, _, _ = live.step(torch.zeros(2, 14))
     assert terminated.tolist() == [True, False]
+
+
+def _bout(seed, loser, how, time_s):
+    return arena_tug.BoutOutcome(seed, loser, how, time_s, np.zeros((2, 0, 21)), np.zeros((2, 1, 21)))
+
+
+def test_the_summary_counts_who_lost_and_how():
+    from microduck_challenges.tug_of_war import check
+    results = [("west", _bout(1, 0, "pit", 6.2)), ("east", _bout(2, 0, "fall", 3.0)),
+               ("west", _bout(3, 1, "marker", 9.0)), ("east", _bout(4, None, "draw", 1.0))]
+    assert check.summary(results) == [
+        "bout 1 · seed 1 · A west · A loses by pit at 6.20 s",
+        "bout 2 · seed 2 · A east · B loses by fall at 3.00 s",
+        "bout 3 · seed 3 · A west · B loses by marker at 9.00 s",
+        "bout 4 · seed 4 · A east · drawn at 1.00 s",
+        "A 2 · B 1 · draws 1 · by pit 1 · by fall 1 · by marker 1 · median decision 4.6 s"]
+
+
+def test_the_check_swaps_sides_on_seeds_one_up(capsys):
+    from microduck_challenges.tug_of_war import check
+    walker = str(ASSET_ROOT / "policies" / "BEST_alpha_walking.onnx")
+    assert check.main([walker, walker, "--bouts", "2"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3
+    assert lines[0].startswith("bout 1 · seed 1 · A west") and lines[1].startswith("bout 2 · seed 2 · A east")
+    assert lines[2].startswith("A ") and "median decision" in lines[2]
+
+
+def test_an_unreadable_policy_is_reported(tmp_path, capsys):
+    from microduck_challenges.tug_of_war import check
+    missing = str(tmp_path / "gone.onnx")
+    assert check.main([missing, missing]) == 1
+    assert missing in capsys.readouterr().err
