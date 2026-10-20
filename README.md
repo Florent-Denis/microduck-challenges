@@ -9,6 +9,7 @@ working training environment: train it unchanged and the robot competes.
 | got_a_talent | got-a-talent | Mjlab-GotATalent-MicroDuck |
 | hill_climb_1m5 | hill-climb-1m5 | Mjlab-HillClimb1m5-MicroDuck |
 | roller_sprint_2m | roller-sprint-2m | Mjlab-RollerSprint2m-MicroDuck |
+| tug_of_war | tug-of-war | Mjlab-TugOfWar-MicroDuck |
 
 Training with a coding agent (Claude Code, Codex, Cursor…)? Each challenge folder has an
 `AGENTS.md` that tells it which files to change, how to run and judge a training, and the
@@ -27,6 +28,12 @@ wheees), a `song` of notes beside the keyframes, and a `voice` that tunes it (th
 A performance can also be a troupe of up to 8 ducks in one physics. Each duck has its own policy
 (yours, or any public one on the Hub pinned to a commit, on legs or rollers), place, keyframes,
 voice and song: see the guide's Troupe and Placement sections.
+
+The Tug of War is a duel: two ducks neck to neck over a pit, each pulling a 1 m string by walking
+backwards at `-0.30 m/s`; the one that drops into the pit or falls over loses. The Arena rates a
+policy on its pulling bench, a winch that pulls harder and harder, in newtons (the mean of five seeds,
+higher wins), and every entry plays the weekly cup. Check which of two policies pulls the other off
+with `uv run --frozen --group workshop python -m microduck_challenges.tug_of_war.check A.onnx B.onnx [--bouts 10]`.
 
 ## The workshop
 
