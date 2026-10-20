@@ -24,9 +24,10 @@ decisions, each commented where it is made:
   D6  the twist is the event's fixed command, -0.30 m/s backwards, in every env
   D7  the Arena's collision set (the standup robot: a dragged duck touches with its body) and
       solver: implicitfast, 10/20 iterations, 0.005 s x 4
-  D9  the pit ends an episode, with an `out` penalty, as on the Arena (owner, 2026-10-20: going
-      down to hold is a fair way to hold, the point is to drag the other duck in). A fall ends
-      one too, TRAINING ONLY, with the same penalty: the Arena's fall rule (ArenaFall) ends a
+  D9  either pit ends an episode, as on the Arena (owner, 2026-10-20: going down to hold is a
+      fair way to hold, the point is to drag the other duck in): the learner's costs `out`
+      (-50), the opponent's pays `win` (+50); both in on one step pay nothing, the rarest end. A
+      fall ends one too, TRAINING ONLY, with `out`: the Arena's fall rule (ArenaFall) ends a
       training episode so the duck keeps learning to stand and pull; the Arena judges only the
       pit. Without it an untrained duck falls at 1 s and lies on its side for the rest of the
       episode, collecting the pit margin, and never learns to stand (t2, t3)
@@ -34,15 +35,24 @@ decisions, each commented where it is made:
   D12 the starts: west x [west_x, west_x + 2 cm], east x [east_x - 2 cm, east_x], y ±1 cm, yaw
       ±5° (east 180° ± 5°): never farther apart than the Arena's taut start, since a stretched
       start jerks both ducks
-  D13 the critic alone reads the pit margin; the actor reads the Arena's 61 numbers
-  D14 `retreat` pays the new ground the string end wins away from the pit (not its backward
-      speed, which a sway earns with no net gain)
+  D13 the critic alone reads the pit margin, the opponent's trunk (its position from the
+      learner's, its gravity, its velocities), the string's length and the marker; the actor
+      reads the Arena's 61 numbers
+  D14 `marker_ground` pays the new ground the marker wins towards the learner, the knob a
+      novice tunes as "Win ground": the Arena rates a bout by the marker, and only ground past
+      the episode's best counts, so a sway earns nothing
   D15 walking back pays three times more (`back_reward` 3.0, std √0.05: standing still keeps a
       sixth of it). t1-t5 never discovered the walk back: each dove just under the fall line
       and earned at standstill 0.41 of what walking back pays
   D16 the opponent is the Arena's reference duck, frozen (opponent.py): an action term with no
       agent dimension observes it as the Arena does and drives its own servos at each step's
-      start, on the state the learner's observation saw; no randomisation names it
+      start, on the state the learner's observation saw; no randomisation names it: the Arena
+      runs its reference duck without any
+  D17 locomotion first: an episode that starts before iteration TAUT_FROM_ITERATION has a slack
+      string (its limit SLACK_M), written per env at its reset in a per-world `tendon_range`.
+      t6 and t7 learned the walk back only with no load, by iteration 250; switching at a reset
+      never yanks a running bout. A played bout (`play`) is taut from its first step: its env
+      counts steps from 0
 """
 
 import math
@@ -60,6 +70,7 @@ from mjlab.managers import (
     RewardTermCfg,
     TerminationTermCfg,
 )
+from mjlab.managers.event_manager import requires_model_fields
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import (
     RslRlOnPolicyRunnerCfg,
@@ -77,7 +88,16 @@ from mjlab_microduck.tasks import mdp as microduck_mdp
 from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
 from .opponent import OpponentActionCfg
-from .rewards import ArenaFall, Retreat, pit_margin, pit_margin_reward
+from .rewards import (
+    ArenaFall,
+    MarkerGround,
+    ended_by,
+    marker_x,
+    opponent_state,
+    pit_margin,
+    pit_margin_reward,
+    string_length,
+)
 
 # Copied from the Arena (the HF job cannot import it); tests/test_tug_of_war.py pins each one.
 LENGTH_M, WIDTH_M, WALL_HEIGHT_M = 4.0, 0.8, 0.15          # arena/events/tug-of-war.toml
@@ -96,6 +116,10 @@ STRING = "string"  # the spatial tendon, as arena.course.STRING
 
 ROBOT = "robot/"  # the prefix mjlab attaches the learner entity under
 OPPONENT = "opponent/"  # and the opponent's
+
+# Locomotion first (D17): the string's limit until the walk back, and the iteration it ends at.
+SLACK_M = 100.0
+TAUT_FROM_ITERATION = 250
 
 # The sprint's recipe switches and ranges (sprint_2m/env.py), the ones it uses.
 NUM_STEPS_PER_ENV = 24
@@ -204,6 +228,19 @@ def tug_scene(spec: mujoco.MjSpec) -> None:
     string.limited = True
     string.range = [0.0, STRING_M]
     string.wrap_site(OPPONENT + STRING_SITE)
+
+
+@requires_model_fields("tendon_range")
+def string_limit(env: ManagerBasedRlEnv, env_ids: torch.Tensor, taut_from_step: int) -> None:
+    """A reset event (D17): the string's limit for the episodes `env_ids` start, SLACK_M before
+    `taut_from_step` control steps of training (`common_step_counter`), STRING_M from then on.
+
+    The decorator has mjlab expand `tendon_range` per world, so each env keeps the limit its
+    episode started with until its next reset.
+    """
+    string = env.sim.mj_model.tendon(STRING).id
+    taut = env.common_step_counter >= taut_from_step
+    env.sim.model.tendon_range[env_ids, string, 1] = STRING_M if taut else SLACK_M
 
 
 def heading_error(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -405,13 +442,15 @@ def make_env_cfg(
         params={"std": 0.4, "asset_cfg": SceneEntityCfg("robot")},
     )
 
-    # The new ground the string end wins away from the pit (D14). Only ground
-    # west of the episode's best counts, so swaying earns nothing. Scale 0.2 m/s:
-    # backing at the event's 0.30 m/s earns tanh(1.5), 0.9 of it, each step.
-    cfg.rewards["retreat"] = RewardTermCfg(
-        func=Retreat,
-        weight=1.0,
-        params={"offset": STRING_OFFSET, "scale": 0.2},
+    # The new ground the marker wins towards the learner (D14), the knob a novice
+    # tunes as "Win ground". Only ground west of the episode's best counts, so
+    # swaying earns nothing. Scale 0.05 m/s: a marker won at 5 cm/s pays tanh(1),
+    # 0.76 of it, each step; backing at the event's 0.30 m/s against a still
+    # opponent moves the marker at 0.15 m/s, tanh(3).
+    cfg.rewards["marker_ground"] = RewardTermCfg(
+        func=MarkerGround,
+        weight=knobs["pull_reward"],
+        params={"offset": STRING_OFFSET, "scale": 0.05},
     )
     # The ground kept between the string end and the pit's west edge; the scale
     # is the margin the duck starts with (0.35 m), so giving ground costs from
@@ -421,9 +460,11 @@ def make_env_cfg(
         weight=1.0,
         params={"offset": STRING_OFFSET, "pit_edge_x": -PIT_M / 2, "scale": 0.35},
     )
-    # Out: the pit or, training only, a fall ends the episode (terminations
-    # below); the pit loses a bout on the Arena (D9).
-    cfg.rewards["out"] = RewardTermCfg(func=mdp.is_terminated, weight=-50.0)
+    # Either pit ends the episode (terminations below), as it ends a bout on the
+    # Arena (D9): the learner's or, training only, its fall costs `out`; the
+    # opponent's pays `win`. Both in on one step pay nothing, the rarest end.
+    cfg.rewards["out"] = RewardTermCfg(func=ended_by, weight=-50.0, params={"terms": ("in_pit", "fell")})
+    cfg.rewards["win"] = RewardTermCfg(func=ended_by, weight=50.0, params={"terms": ("opponent_in_pit",)})
 
     # Action smoothness: stage-0 value; the action_rate_weight curriculum below
     # ramps it -0.1 → -1.0 by iter 1500.
@@ -434,10 +475,10 @@ def make_env_cfg(
     # 4 neck/head DOFs a position objective, so the neck is fully shaped.
 
     # === TERMINATIONS ===
-    # The Arena's one end of a bout (D9), the pit, plus a training-only
-    # fall, the time limit and NaN physics. The pit: the trunk below
-    # -PIT_DROP_M, as arena.tug.in_pit judges it. The template's instantaneous
-    # fell_over gives way to the Arena's own fall rule (ArenaFall, below).
+    # The Arena's one end of a bout (D9), a pit, either duck's, plus the
+    # learner's training-only fall, the time limit and NaN physics. A pit: the
+    # trunk below -PIT_DROP_M, as arena.tug.in_pit judges it. The template's
+    # instantaneous fell_over gives way to the Arena's own fall rule (ArenaFall, below).
     # out_of_terrain_bounds reads mjlab's terrain, and there is none (D1).
     del cfg.terminations["fell_over"], cfg.terminations["out_of_terrain_bounds"]
     # Terminate environments that have gone numerically unstable (NaN physics).
@@ -452,6 +493,10 @@ def make_env_cfg(
     cfg.terminations["in_pit"] = TerminationTermCfg(
         func=mdp.root_height_below_minimum,
         params={"minimum_height": -PIT_DROP_M},
+    )
+    cfg.terminations["opponent_in_pit"] = TerminationTermCfg(
+        func=mdp.root_height_below_minimum,
+        params={"minimum_height": -PIT_DROP_M, "asset_cfg": SceneEntityCfg("opponent")},
     )
     # TRAINING ONLY (D9): a fall ends a training episode so the duck keeps
     # learning to stand and pull; the Arena judges only the pit. The Arena's
@@ -522,6 +567,13 @@ def make_env_cfg(
             "velocity_range": (0.0, 0.0),
             "asset_cfg": SceneEntityCfg("opponent", joint_names=(".*",)),
         },
+    )
+    # Locomotion first (D17): the string is slack for the episodes that start
+    # before TAUT_FROM_ITERATION, STRING_M long after, set at each env's reset.
+    cfg.events["string_limit"] = EventTermCfg(
+        func=string_limit,
+        mode="reset",
+        params={"taut_from_step": 0 if play else TAUT_FROM_ITERATION * NUM_STEPS_PER_ENV},
     )
 
     # Velocity-based pushes for robustness training
@@ -640,12 +692,15 @@ def make_env_cfg(
     # Privileged too: the heading error heading_hold prices.
     cfg.observations["critic"].terms["heading_error"] = ObservationTermCfg(func=heading_error)
     # And what the tug's rewards pay on (D13): the string end's margin to the
-    # pit. The actor reads none of it: on the Arena it gets the 61 numbers
-    # every legs policy gets.
+    # pit, the opponent's trunk, the string's length and the marker. The actor
+    # reads none of it: on the Arena it gets the 61 numbers every legs policy gets.
     cfg.observations["critic"].terms["pit_margin"] = ObservationTermCfg(
         func=pit_margin,
         params={"offset": STRING_OFFSET, "pit_edge_x": -PIT_M / 2},
     )
+    cfg.observations["critic"].terms["opponent"] = ObservationTermCfg(func=opponent_state)
+    for name, func in (("string_length", string_length), ("marker_x", marker_x)):
+        cfg.observations["critic"].terms[name] = ObservationTermCfg(func=func, params={"offset": STRING_OFFSET})
 
     # Projected gravity, the slot the Arena feeds the policy.
     cfg.observations["actor"].terms["projected_gravity"] = deepcopy(

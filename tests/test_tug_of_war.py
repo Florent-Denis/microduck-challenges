@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import mujoco, numpy as np, onnx, onnxruntime, pytest, torch
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.scene import Scene, SceneCfg
 from mjlab_microduck import challenge as ch
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
@@ -96,7 +97,7 @@ def test_the_actor_reads_the_events_command(cfg):
         assert all(lo <= 0.0 <= hi for lo, hi in cfg.commands[name].ranges)  # the Arena sends zeros
     actor, critic = cfg.observations["actor"].terms, cfg.observations["critic"].terms
     assert list(actor)[-3:] == ["command", "head_command", "body_command"]
-    privileged = {"pit_margin", "heading_error"}
+    privileged = {"opponent", "string_length", "marker_x", "pit_margin", "heading_error", "base_lin_vel"}
     assert privileged <= set(critic) and not privileged & set(actor)
 
 
@@ -135,15 +136,50 @@ def test_backing_away_pays_far_more_than_standing_still(cfg):
     assert paid(0.0) == pytest.approx(3.0 * math.exp(-1.8), abs=1e-6)   # 0.50, a sixth of walking back
 
 
-def test_the_pit_and_a_training_fall_end_an_episode(cfg):
-    """The pit, as on the Arena; and a fall, training only (the Arena judges only the pit), so the duck
-    keeps learning to stand and pull instead of lying on its side for the rest of the episode."""
-    assert set(cfg.terminations) == {"time_out", "nan_state", "in_pit", "fell"}
-    assert cfg.terminations["in_pit"].params["minimum_height"] == -arena_tug.PIT_DROP_M
-    assert cfg.terminations["fell"].func is rewards.ArenaFall
-    assert cfg.terminations["fell"].params == {"fall_gravity_z": EVENT.termination.fall_gravity_z,
-                                               "hold_steps": round(EVENT.termination.fall_hold_s / 0.02)}
-    assert cfg.rewards["out"].weight == -50.0
+def test_either_pit_ends_the_episode_and_pays_its_side(cfg):
+    """Either pit, as on the Arena; and the learner's fall, training only (the Arena judges only the pit),
+    so the duck keeps learning to stand and pull instead of lying on its side for the rest of the episode."""
+    t, r = cfg.terminations, cfg.rewards
+    assert set(t) == {"time_out", "nan_state", "in_pit", "opponent_in_pit", "fell"}
+    assert t["in_pit"].params["minimum_height"] == t["opponent_in_pit"].params["minimum_height"] == -arena_tug.PIT_DROP_M
+    assert t["opponent_in_pit"].params["asset_cfg"].name == "opponent"
+    assert t["fell"].func is rewards.ArenaFall
+    assert t["fell"].params == {"fall_gravity_z": EVENT.termination.fall_gravity_z,
+                                "hold_steps": round(EVENT.termination.fall_hold_s / 0.02)}
+    assert (r["out"].func, r["out"].weight, r["out"].params) == (rewards.ended_by, -50.0, {"terms": ("in_pit", "fell")})
+    assert (r["win"].func, r["win"].weight, r["win"].params) == (rewards.ended_by, 50.0, {"terms": ("opponent_in_pit",)})
+    fired = {"in_pit": torch.tensor([True, False, False, True]), "fell": torch.tensor([False, True, False, False]),
+             "opponent_in_pit": torch.tensor([False, False, True, True])}
+    env = SimpleNamespace(termination_manager=SimpleNamespace(get_term=fired.get))
+    paid = -50 * rewards.ended_by(env, ("in_pit", "fell")) + 50 * rewards.ended_by(env, ("opponent_in_pit",))
+    assert paid.tolist() == [-50.0, -50.0, 50.0, 0.0]   # both in on one step: neither
+
+
+def test_the_string_is_slack_until_the_walk_back(cfg, training_model):
+    term = cfg.events["string_limit"]
+    assert term.mode == "reset" and (tug.TAUT_FROM_ITERATION, tug.SLACK_M) == (250, 100.0)
+    assert term.params == {"taut_from_step": tug.TAUT_FROM_ITERATION * tug.RL_CFG.num_steps_per_env}
+    assert "tendon_range" in tug.string_limit.model_fields
+    string, ranges = training_model.tendon(tug.STRING).id, torch.zeros(3, training_model.ntendon, 2)
+    env = SimpleNamespace(common_step_counter=0, sim=SimpleNamespace(mj_model=training_model, model=SimpleNamespace(tendon_range=ranges)))
+    tug.string_limit(env, torch.tensor([0, 1, 2]), **term.params)
+    env.common_step_counter = term.params["taut_from_step"]
+    tug.string_limit(env, torch.tensor([1]), **term.params)
+    assert ranges[:, string, 1].tolist() == [tug.SLACK_M, tug.STRING_M, tug.SLACK_M]   # only a reset turns it taut
+
+
+def test_a_played_bout_is_taut_from_the_start():
+    """`play` shows a trained duck in the Arena's bout: its env counts steps from 0."""
+    assert tug.make_env_cfg(play=True).events["string_limit"].params == {"taut_from_step": 0}
+
+
+def test_the_learners_randomisation_leaves_the_opponent_alone(cfg):
+    for name, term in cfg.events.items():
+        named = {v.name for v in term.params.values() if isinstance(v, SceneEntityCfg)}
+        if name in ("reset_opponent_base", "reset_opponent_joints"):
+            assert named == {"opponent"}, name
+        else:
+            assert named <= {"robot"}, name
 
 
 def test_a_fall_is_the_arenas_rule(cfg):
@@ -159,42 +195,79 @@ def test_a_fall_is_the_arenas_rule(cfg):
     assert term(env, **params).tolist() == [False, False]
 
 
-def _retreat_run(cfg, path, reset_at=None):
-    """What retreat pays each step for string ends at `path[k]` (x per env, m), the trunk upright,
-    the env reset just before step `reset_at`."""
-    params = cfg.rewards["retreat"].params
-    data = SimpleNamespace(root_link_quat_w=torch.tensor([[1.0, 0.0, 0.0, 0.0]] * len(path[0])))
-    env = SimpleNamespace(num_envs=len(path[0]), device="cpu", step_dt=0.02, scene={"robot": SimpleNamespace(data=data)})
-    term = rewards.Retreat(cfg.rewards["retreat"], env)
+def _duck(pos, quat, **fields):
+    return SimpleNamespace(data=SimpleNamespace(root_link_pos_w=torch.tensor(pos), root_link_quat_w=torch.tensor(quat), **fields))
+
+
+def _marker_run(cfg, path, reset_at=None):
+    """What marker_ground pays each step for learner string ends at `path[k]` (x per env, m), its
+    trunk upright, the opponent's end held at +0.5 m (its trunk turned half a way), so the marker
+    moves at half the learner's end; the env reset just before step `reset_at`."""
+    params, n = cfg.rewards["marker_ground"].params, len(path[0])
+    ox, oy, _ = tug.STRING_OFFSET
+    robot, opponent = _duck([[0.0] * 3] * n, [[1.0, 0.0, 0.0, 0.0]] * n), _duck([[0.5 + ox, oy, 0.11]] * n, [[0.0, 0.0, 0.0, 1.0]] * n)
+    env = SimpleNamespace(num_envs=n, device="cpu", step_dt=0.02, scene={"robot": robot, "opponent": opponent})
+    term = rewards.MarkerGround(cfg.rewards["marker_ground"], env)
     paid = []
     for k, xs in enumerate(path):
         if k == reset_at:
             term.reset(torch.tensor([0]))
-        data.root_link_pos_w = torch.tensor([[x - tug.STRING_OFFSET[0], 0.0, 0.11] for x in xs])
+        robot.data.root_link_pos_w = torch.tensor([[x - ox, 0.0, 0.11] for x in xs])
         paid.append(term(env, **params).tolist())
     return paid
 
 
-def test_retreat_pays_new_ground(cfg):
-    """Each step, the ground the string end gains west of the westmost point it reached this episode,
-    at the scale's pace (0.2 m/s) tanh(1): a steady walk back pays it every step, being dragged east
-    nothing, a sway with no net gain only its first new ground."""
-    assert cfg.rewards["retreat"].func is rewards.Retreat and cfg.rewards["retreat"].weight == 1.0
-    assert cfg.rewards["retreat"].params == {"offset": tug.STRING_OFFSET, "scale": 0.2}
-    step = 0.2 * 0.02   # 0.2 m/s over a control step
+def test_marker_ground_pays_new_ground_towards_the_learner(cfg):
+    """Each step, the ground the marker gains west of the westmost point it reached this episode, at
+    the scale's pace (0.05 m/s) tanh(1): a steady pull pays it every step, being dragged east nothing,
+    a sway with no net gain only its first new ground. The knob a novice tunes is "Win ground"."""
+    knob = tomllib.loads((Path(tug.__file__).parent / "challenge.toml").read_text())["params"]["pull_reward"]
+    assert (knob["label"], knob["value"], knob["min"], knob["max"]) == ("Win ground", 2.0, 0.5, 5.0)
+    term = cfg.rewards["marker_ground"]
+    assert term.func is rewards.MarkerGround and term.weight == 2.0
+    assert term.params == {"offset": tug.STRING_OFFSET, "scale": 0.05}
+    step = 2 * 0.05 * 0.02   # the learner's end, so the marker moves 0.05 m/s over a control step
     sway = [-0.5, -0.5 - step, -0.5 + step] * 4
-    paid = _retreat_run(cfg, [(-0.5 - k * step, -0.5 + k * step, sway[k]) for k in range(12)])
+    paid = _marker_run(cfg, [(-0.5 - k * step, -0.5 + k * step, sway[k]) for k in range(12)])
     walk, dragged, swayed = zip(*paid)
     assert walk[0] == 0.0 and walk[1:] == pytest.approx([math.tanh(1.0)] * 11, abs=1e-4)
     assert dragged == (0.0,) * 12
     assert swayed[1] == pytest.approx(math.tanh(1.0), abs=1e-4) and swayed[:1] + swayed[2:] == (0.0,) * 11
 
 
-def test_a_reset_clears_the_retreat_record(cfg):
+def test_a_reset_clears_the_marker_record(cfg):
     """Back at the start after a reset, the ground the last episode won is new again."""
-    step = 0.2 * 0.02
-    paid = _retreat_run(cfg, [(-0.5 - k * step,) for k in range(10)] + [(-0.5 - k * step,) for k in range(3)], reset_at=10)
+    step = 2 * 0.05 * 0.02
+    paid = _marker_run(cfg, [(-0.5 - k * step,) for k in range(10)] + [(-0.5 - k * step,) for k in range(3)], reset_at=10)
     assert [p[0] for p in paid[10:]] == pytest.approx([0.0, math.tanh(1.0), math.tanh(1.0)], abs=1e-4)
+
+
+def test_the_marker_is_where_the_arena_reads_it():
+    rng, frame, scene = np.random.default_rng(2), np.zeros((2, 1, 21)), {}
+    for k, name in enumerate(("robot", "opponent")):
+        pos, quat = rng.uniform(-0.6, 0.6, 3).astype(np.float32), rng.normal(size=4).astype(np.float32)
+        quat /= np.linalg.norm(quat)
+        frame[k, 0, :3], frame[k, 0, 3:7] = pos, quat
+        scene[name] = _duck(pos[None], quat[None])
+    env, offset = SimpleNamespace(scene=scene), arena_course.string_offset("legs")
+    ends = arena_tug.string_ends(frame, offset)[:, 0]
+    assert rewards.marker_x(env, tug.STRING_OFFSET)[:, 0].tolist() == pytest.approx(arena_tug.marker_x(frame, offset).tolist(), abs=1e-6)
+    assert rewards.string_length(env, tug.STRING_OFFSET)[:, 0].tolist() == pytest.approx([np.linalg.norm(ends[0] - ends[1])], abs=1e-6)
+
+
+def test_the_critic_reads_the_opponent_from_the_learner(cfg):
+    """The opponent's trunk from the learner's, its projected gravity, its world linear and own-frame
+    angular velocities; the string's length and the marker, where the Arena reads them."""
+    terms = cfg.observations["critic"].terms
+    assert terms["opponent"].func is rewards.opponent_state
+    for name in ("string_length", "marker_x"):
+        assert (terms[name].func, terms[name].params) == (getattr(rewards, name), {"offset": tug.STRING_OFFSET})
+    fields = ("projected_gravity_b", "root_link_lin_vel_w", "root_link_ang_vel_b")
+    robot = _duck([[-0.53, 0.01, 0.11]], [[1.0, 0.0, 0.0, 0.0]])
+    opponent = _duck([[0.55, -0.02, 0.12]], [[0.0, 0.0, 0.0, 1.0]], **{f: torch.rand(1, 3) for f in fields})
+    state = rewards.opponent_state(SimpleNamespace(scene={"robot": robot, "opponent": opponent}))
+    assert state.shape == (1, 12) and state[0, :3].tolist() == pytest.approx([1.08, -0.03, 0.01])
+    assert torch.equal(state[0, 3:], torch.cat([getattr(opponent.data, f)[0] for f in fields]))
 
 
 def test_the_recipe_knows_no_winch(cfg, training_model):

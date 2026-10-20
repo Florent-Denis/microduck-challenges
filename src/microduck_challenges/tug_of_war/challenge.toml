@@ -14,6 +14,12 @@ num_envs       = 4096
 max_iterations = 3000
 seed           = 1
 
+[params.pull_reward]
+label = "Win ground"
+value = 2.0
+min   = 0.5
+max   = 5.0
+
 [params.back_reward]
 label = "Walk backwards"
 value = 3.0

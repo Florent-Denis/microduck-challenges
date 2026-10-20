@@ -43,6 +43,7 @@ CHALLENGES = {
         "upright_reward": ("upright", 1.3),
     },
     "tug_of_war": {
+        "pull_reward": ("marker_ground", 3.1),
         "back_reward": ("track_linear_velocity", 2.3),
         "upright_reward": ("upright", 1.7),
     },
