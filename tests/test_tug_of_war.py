@@ -21,7 +21,7 @@ CONTACT = ("geom_type", "geom_size", "geom_contype", "geom_conaffinity", "geom_c
 
 @pytest.fixture(scope="module")
 def arena_model():
-    return arena_course.compile_tug(EVENT, 2)
+    return arena_course.compile_tug(EVENT)
 
 
 @pytest.fixture(scope="module")
@@ -100,7 +100,7 @@ def test_no_env_is_sent_forward(cfg):
 
 
 def test_the_start_is_the_arenas(cfg):
-    pose, west = cfg.events["reset_base"].params["pose_range"], arena_course.tug_layout(EVENT.course, 2)[0]
+    pose, west = cfg.events["reset_base"].params["pose_range"], arena_course.tug_layout(EVENT.course)[0]
     assert sum(pose["x"]) / 2 == pytest.approx(west.x) and sum(pose["y"]) / 2 == pytest.approx(west.y)
     assert pose["z"][0] <= arena_course.SPAWN_HEIGHT_M <= pose["z"][1]
     yaw = np.radians(EVENT.start.yaw_deg)
