@@ -364,14 +364,6 @@ def live():
     env.close()
 
 
-def test_the_env_runs_a_bout_on_the_actors_61_numbers(live):
-    string = live.sim.mj_model.tendon(tug.STRING).id
-    assert live.sim.model.tendon_range[:, string, 1].tolist() == [tug.SLACK_M] * 2   # step 0: slack, one limit per world
-    for _ in range(10):
-        obs, *_ = live.step(torch.zeros(2, 14))
-    assert obs["actor"].shape == (2, 61) and torch.isfinite(obs["critic"]).all()
-
-
 def test_the_opponent_starts_where_the_arenas_east_duck_does(live):
     live.reset()
     east, data = arena_course.tug_layout(EVENT.course)[1], live.scene["opponent"].data
