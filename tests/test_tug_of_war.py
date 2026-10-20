@@ -3,13 +3,14 @@ import subprocess, sys
 from types import SimpleNamespace
 import mujoco, numpy as np, pytest, torch
 from mjlab.scene import Scene, SceneCfg
+from mjlab_microduck import challenge as ch
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
 
 import microduck_challenges  # noqa: F401
 from arena import course as arena_course, tug as arena_tug
 from arena.constants import DEFAULT_POSE, JOINT_NAMES
 from arena.manifest import load_event
-from microduck_challenges.tug_of_war import env as tug
+from microduck_challenges.tug_of_war import env as tug, rewards
 
 EVENT = load_event("tug-of-war")
 CONTACT = ("geom_type", "geom_size", "geom_contype", "geom_conaffinity", "geom_condim", "geom_priority",
@@ -154,3 +155,103 @@ def test_the_winch_top_widens_stage_by_stage():
         env.common_step_counter = step
         tug.winch_top_curriculum(env, None, stages)
         assert term.cfg.top_n == top
+
+
+@pytest.fixture(scope="module")
+def cfg():
+    return tug.make_env_cfg()
+
+
+def test_the_scene_and_solver_are_the_tugs(cfg, arena_model):
+    assert cfg.scene.terrain is None and cfg.scene.spec_fn is tug.tug_scene
+    assert cfg.scene.entities["robot"] is MICRODUCK_STANDUP_ROBOT_CFG  # collisions pinned by test_got_a_talent
+    assert (cfg.sim.mujoco.iterations, cfg.sim.mujoco.ls_iterations) == (arena_model.opt.iterations, arena_model.opt.ls_iterations)
+    assert cfg.sim.mujoco.timestep == pytest.approx(arena_model.opt.timestep) and cfg.decimation == 4
+    assert cfg.sim.mujoco.integrator == "implicitfast" and arena_model.opt.integrator == mujoco.mjtIntegrator.mjINT_IMPLICITFAST
+
+
+def test_the_actor_reads_the_events_command(cfg):
+    ranges = cfg.commands["twist"].ranges
+    assert ranges.lin_vel_x == (EVENT.command[0],) * 2 and ranges.lin_vel_y == (0.0, 0.0) and ranges.ang_vel_z == (0.0, 0.0)
+    assert cfg.commands["twist"].rel_standing_envs == 0.0 and "standing_envs" not in cfg.curriculum
+    for name in ("head_pose", "body_pose"):
+        assert all(lo <= 0.0 <= hi for lo, hi in cfg.commands[name].ranges)  # the Arena sends zeros
+    actor, critic = cfg.observations["actor"].terms, cfg.observations["critic"].terms
+    assert list(actor)[-3:] == ["command", "head_command", "body_command"]
+    privileged = {"winch_pull", "pit_margin", "heading_error"}
+    assert privileged <= set(critic) and not privileged & set(actor)
+
+
+def test_no_env_is_sent_forward(cfg):
+    """mjlab's template sends a fifth of the envs forward (vx made |vx| ≥ 0.3): the Arena never does."""
+    assert cfg.commands["twist"].rel_forward_envs == 0.0
+
+
+def test_the_start_is_the_arenas(cfg):
+    pose, west = cfg.events["reset_base"].params["pose_range"], arena_course.tug_layout(EVENT.course, 1)[0]
+    assert sum(pose["x"]) / 2 == pytest.approx(west.x) and sum(pose["y"]) / 2 == pytest.approx(west.y)
+    assert pose["z"][0] <= arena_course.SPAWN_HEIGHT_M <= pose["z"][1]
+    yaw = np.radians(EVENT.start.yaw_deg)
+    assert pose["yaw"][0] <= -yaw and yaw <= pose["yaw"][1] <= 0.1  # not the template's ±π
+    joints = cfg.events["reset_robot_joints"].params["position_range"]
+    assert joints[0] <= -EVENT.start.joint_rad and EVENT.start.joint_rad <= joints[1]
+    assert cfg.episode_length_s == pytest.approx(EVENT.start.settle_s + EVENT.time_limit_s)
+
+
+def test_the_curriculum_pulls_past_the_benchs_top(cfg):
+    last = cfg.curriculum["winch_top"].params["top_stages"][-1]["top_n"]
+    assert last[0] < tug.BENCH_TOP_N < last[1]
+
+
+def test_the_winch_top_widens_on_training_iterations(cfg):
+    """winch_top_curriculum finds the command term named `winch`, and its stages count env steps:
+    num_steps_per_env per training iteration."""
+    assert isinstance(cfg.commands["winch"], tug.WinchCommandCfg)
+    stages = cfg.curriculum["winch_top"].params["top_stages"]
+    assert [s["step"] for s in stages] == [i * tug.RL_CFG.num_steps_per_env for i in (0, 500, 1000, 1500)]
+
+
+def test_the_pit_and_a_fall_end_an_episode_early(cfg):
+    assert set(cfg.terminations) == {"time_out", "nan_state", "in_pit", "fell"}
+    assert cfg.terminations["in_pit"].params["minimum_height"] == -arena_tug.PIT_DROP_M
+    assert cfg.terminations["fell"].func is rewards.ArenaFall
+    assert cfg.terminations["fell"].params == {"fall_gravity_z": EVENT.termination.fall_gravity_z,
+                                               "hold_steps": round(EVENT.termination.fall_hold_s / 0.02)}
+    assert cfg.rewards["out"].weight == -50.0
+
+
+def test_a_fall_is_the_arenas_rule(cfg):
+    """Gravity z above fall_gravity_z for the hold's straight control steps, as arena.stage.fell_at counts it."""
+    params = cfg.terminations["fell"].params
+    gravity = torch.tensor([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0]])   # env 0 upright, env 1 on its side
+    env = SimpleNamespace(num_envs=2, device="cpu",
+                          scene={"robot": SimpleNamespace(data=SimpleNamespace(projected_gravity_b=gravity))})
+    term = rewards.ArenaFall(cfg.terminations["fell"], env)
+    seen = [term(env, **params).tolist() for _ in range(params["hold_steps"])]
+    assert seen[-2:] == [[False, False], [False, True]]   # out on the step that completes the hold
+    term.reset(torch.tensor([1]))
+    assert term(env, **params).tolist() == [False, False]
+
+
+def test_hold_pays_the_pull_only_on_its_feet():
+    """The winch's pull while upright and not out; nothing once tipped past the fall rule's line, or out."""
+    gravity = torch.tensor([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]])
+    env = SimpleNamespace(scene={"robot": SimpleNamespace(data=SimpleNamespace(projected_gravity_b=gravity))},
+                          command_manager=SimpleNamespace(get_command={"winch": torch.full((3, 1), 0.4)}.get),
+                          termination_manager=SimpleNamespace(terminated=torch.tensor([False, False, True])))
+    assert rewards.hold(env, tug.FALL_GRAVITY_Z).tolist() == pytest.approx([0.4, 0.0, 0.0])
+
+
+def test_the_string_end_is_where_the_arena_judges_it():
+    pos, quat = torch.tensor([[-0.53, -0.01, 0.11]]), torch.tensor([[0.97, 0.05, -0.2, 0.1]])
+    quat = quat / quat.norm()
+    env = SimpleNamespace(scene={"robot": SimpleNamespace(data=SimpleNamespace(root_link_pos_w=pos, root_link_quat_w=quat))})
+    margin = rewards.pit_margin(env, tug.STRING_OFFSET, -tug.PIT_M / 2)
+    frame = np.zeros((1, 1, 21))
+    frame[0, 0, :3], frame[0, 0, 3:7] = pos[0].numpy(), quat[0].numpy()
+    end = arena_tug.string_ends(frame, arena_course.string_offset("legs"))[0, 0]
+    assert margin.item() == pytest.approx(-tug.PIT_M / 2 - end[0], abs=1e-6)
+
+
+def test_the_manifest_says_what_the_policy_reads():
+    assert "-0.30" in ch.for_task("Mjlab-TugOfWar-MicroDuck").command["twist"]

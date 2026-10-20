@@ -42,6 +42,11 @@ CHALLENGES = {
         "speed_reward": ("wheel_speed", 13.5),
         "upright_reward": ("upright", 1.3),
     },
+    "tug_of_war": {
+        "pull_reward": ("hold", 3.1),
+        "back_reward": ("track_linear_velocity", 2.3),
+        "upright_reward": ("upright", 1.7),
+    },
 }
 
 ROOT = Path(microduck_challenges.__file__).parent
