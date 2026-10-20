@@ -356,6 +356,7 @@ def test_the_opponent_acts_on_the_arenas_joints(live):
         term.policy = policy
     expected = home + act * ACTION_SCALE   # runner._Duck.act, on the robot's own default
     assert torch.allclose(duck.data.joint_pos_target[:, term.target_ids], expected, atol=1e-6)
+    assert torch.equal(term.last_action, act)   # the policy's raw output, as runner._Duck keeps it
 
 
 def _duck_addresses(model, prefix):
