@@ -34,8 +34,8 @@ decisions, each commented where it is made:
       either duck ends one too, paying nothing: the critic reads both
   D11 an episode is the settle plus a bout: `BOUT_S`
   D12 the starts: west x [west_x, west_x + 2 cm], east x [east_x - 2 cm, east_x], y ±1 cm, yaw
-      ±5° (east 180° ± 5°): never farther apart than the Arena's taut start, since a stretched
-      start jerks both ducks
+      the Arena's ±YAW_PERTURBATION_DEG (east 180° ± it): never farther apart than the Arena's
+      taut start, since a stretched start jerks both ducks
   D13 the critic alone reads the pit margin, the opponent's trunk (its position from the
       learner's, its gravity, its velocities), the string's length and the marker; the actor
       reads the Arena's 61 numbers
@@ -581,13 +581,13 @@ def make_env_cfg(
     # The starts are the Arena's (arena.course.tug_layout, D12): the west duck
     # faces east, the east duck west, each with its string end on y = 0, the two
     # STRING_M apart and centred on the pit. The offsets only ever bring them closer
-    # (west x up to +2 cm, east x down to -2 cm), the ±1 cm and ±5° (the Arena
-    # perturbs its yaw by ±YAW_PERTURBATION_DEG) instead of the template's ±0.5 m and
-    # ±π, which would start ducks over the pit or facing away from the lane. The
-    # joints get the Arena's perturbation.
+    # (west x up to +2 cm, east x down to -2 cm), the ±1 cm and the Arena's yaw
+    # perturbation instead of the template's ±0.5 m and ±π, which would start ducks
+    # over the pit or facing away from the lane. The joints get the Arena's
+    # perturbation.
     west_x, west_y = west_start()
     east_x, east_y = east_start()
-    yaw = math.radians(5.0)
+    yaw = math.radians(YAW_PERTURBATION_DEG)
     cfg.events["reset_base"].params["pose_range"] = {
         "x": (west_x, west_x + 0.02),
         "y": (west_y - 0.01, west_y + 0.01),

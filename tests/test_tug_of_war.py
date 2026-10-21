@@ -127,8 +127,10 @@ def test_the_start_is_the_arenas(cfg):
     pose, west = cfg.events["reset_base"].params["pose_range"], arena_course.tug_layout(EVENT.course)[0]
     assert pose["x"][0] == pytest.approx(west.x) and sum(pose["y"]) / 2 == pytest.approx(west.y)
     assert pose["z"][0] <= arena_course.SPAWN_HEIGHT_M <= pose["z"][1]
-    yaw = np.radians(EVENT.start.yaw_deg)
-    assert pose["yaw"][0] <= -yaw and yaw <= pose["yaw"][1] <= 0.1  # not the template's ±π
+    yaw = math.radians(EVENT.start.yaw_deg)
+    assert pose["yaw"] == pytest.approx((-yaw, yaw))   # the Arena's, not the template's ±π
+    east = cfg.events["reset_opponent_base"].params["pose_range"]["yaw"]
+    assert east == pytest.approx((math.pi - yaw, math.pi + yaw))
     joints = cfg.events["reset_robot_joints"].params["position_range"]
     assert joints[0] <= -EVENT.start.joint_rad and EVENT.start.joint_rad <= joints[1]
     assert cfg.episode_length_s == pytest.approx(tug.SETTLE_S + EVENT.bout.time_limit_s)
@@ -346,8 +348,6 @@ def test_no_start_stretches_the_string(cfg):
     corners = itertools.product(west["x"], west["y"], west["yaw"], east["x"], east["y"], east["yaw"])
     assert max(_ends_apart(*corner) for corner in corners) <= tug.STRING_M + 0.005   # STRING_OFFSET turned by each yaw
     assert west["x"][0] == pytest.approx(tug.west_start()[0]) and east["x"][1] == pytest.approx(tug.east_start()[0])
-    yaw = math.radians(EVENT.start.yaw_deg)
-    assert east["yaw"][0] <= math.pi - yaw and math.pi + yaw <= east["yaw"][1]
 
 
 def test_the_string_end_is_where_the_arena_judges_it():
@@ -381,7 +381,7 @@ def test_the_opponent_starts_where_the_arenas_east_duck_does(live):
     pos, quat = data.root_link_pos_w, data.root_link_quat_w
     assert ((pos[:, 0] - east.x).abs() <= 0.02).all() and ((pos[:, 1] - east.y).abs() <= 0.01).all()
     yaw = torch.rad2deg(2 * torch.atan2(quat[:, 3], quat[:, 0])) % 360
-    assert ((yaw - 180.0).abs() <= 5.0 + 1e-3).all()
+    assert ((yaw - 180.0).abs() <= EVENT.start.yaw_deg + 1e-3).all()
 
 
 def test_the_string_turns_taut_episode_by_episode(live):
