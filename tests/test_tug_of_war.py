@@ -74,16 +74,21 @@ def test_the_course_tiles_the_arenas(arena_model, training_model):
     for name in boxes:
         a = arena_model.geom(name).id
         centre, half = datas[0].geom_xpos[a], arena_model.geom_size[a]
-        area = 0.0
+        area, rects = 0.0, []
         for t in (training_model.geom(n).id for n in tiles if n.rsplit("_", 2)[0] == name):
             pos, size = datas[1].geom_xpos[t], training_model.geom_size[t]
-            assert (2 * size[:2] <= tug.TILE_M + 1e-9).all(), name
-            assert (pos - size >= centre - half - 1e-9).all() and (pos + size <= centre + half + 1e-9).all(), name
+            assert (2 * size[:2] <= tug.TILE_M + 1e-12).all(), name
+            assert (pos - size >= centre - half - 1e-12).all() and (pos + size <= centre + half + 1e-12).all(), name
             assert (pos[2], size[2]) == pytest.approx((centre[2], half[2]), abs=1e-12)
             area += 4 * size[0] * size[1]
+            rects.append((pos[:2] - size[:2], pos[:2] + size[:2]))
             for field in set(CONTACT) - {"geom_size"}:
                 np.testing.assert_allclose(getattr(training_model, field)[t], getattr(arena_model, field)[a], err_msg=f"{name} {field}")
-        assert area == pytest.approx(4 * half[0] * half[1], rel=1e-9), name
+        for i, (low, high) in enumerate(rects):   # no two tiles overlap: with the area, they fill the box
+            for other_low, other_high in rects[i + 1:]:
+                overlap = np.clip(np.minimum(high, other_high) - np.maximum(low, other_low), 0, None)
+                assert overlap[0] * overlap[1] <= 1e-12, name
+        assert area == pytest.approx(4 * half[0] * half[1], rel=1e-12), name
 
 
 @pytest.fixture(scope="module")

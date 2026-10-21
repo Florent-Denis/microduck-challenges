@@ -59,7 +59,10 @@ decisions, each commented where it is made:
       put the contact off the duck, along an edge of that box, by several times its length: under
       the Arena's 21.85 x 40.9 m platforms it landed 60 to 130 m away and the solver turned the
       whole world NaN (t8, t9: nan_state on both ducks at once, the frozen opponent lying head
-      down for most of a bout). On 2 m tiles it lands within 8 m and the world stays finite
+      down for most of a bout). On 2 m tiles it lands within 8 m and the world stays finite.
+      The tiles also give back the Arena's ground: on the 40 m boxes mujoco_warp made about 38 %
+      fewer duck-course contacts than the Arena's MuJoCo and a pushed duck slid further; tiled,
+      both agree (t1-t9 trained on the untiled boxes)
 """
 
 import math
