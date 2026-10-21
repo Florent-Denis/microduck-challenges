@@ -8,6 +8,7 @@ and prints a line per bout (who lost and how it was pulled), then the tally.
 """
 
 import argparse
+import itertools
 import statistics
 import sys
 from pathlib import Path
@@ -18,12 +19,15 @@ from arena.policy import PolicyError, load_policy
 from arena.constants import CTRL_DT
 from arena.tug import BoutOutcome, marker_x, run_bout
 
+from .env import PIT_M
 from .opponent import REFERENCE
+from .rewards import UPRIGHT_TILT_DEG, UPRIGHT_Z_M
 
 EVENT = "tug-of-war"
 SIDES = ("west", "east")
 TAUT_M = 0.98  # the string's ends this far apart: it is taut (a 1 m rope sags short of its length)
 BACKED_S = 2.0  # where A's retreat is read
+LIP_M = 0.08  # A's frames with its trunk this near the pit's lip are left out of the upright reading
 
 
 def play(manifest, a, b, bouts: int) -> list[tuple[str, BoutOutcome]]:
@@ -52,6 +56,19 @@ def pull(outcome: BoutOutcome, side: str) -> str:
     return f"{taut_at} · A backed {round(backed, 1) + 0.0:.1f} cm by {BACKED_S:.0f} s · marker {round(marker, 1) + 0.0:.1f} cm to A"
 
 
+def upright(outcome: BoutOutcome, side: str) -> str:
+    """How A stood: the share of its timed frames upright (trunk at UPRIGHT_Z_M or more, tilt at
+    UPRIGHT_TILT_DEG or less, the tilt read as arena.moments reads it) and its longest straight run
+    down, over the frames whose trunk is more than half the pit and LIP_M from the centre line."""
+    trace = outcome.trace[0 if side == "west" else 1].astype(np.float64)
+    tilt = np.arccos(np.clip(1 - 2 * (trace[:, 4] ** 2 + trace[:, 5] ** 2), -1, 1))
+    standing = (trace[:, 2] >= UPRIGHT_Z_M) & (tilt <= np.radians(UPRIGHT_TILT_DEG))
+    counted = np.abs(trace[:, 0]) > PIT_M / 2 + LIP_M
+    runs = [len(list(run)) for down, run in itertools.groupby(counted & ~standing) if down]
+    share = 100 * (standing & counted).sum() / counted.sum() if counted.any() else 100.0
+    return f"on its feet {share:.0f} % · longest down {max(runs, default=0) * CTRL_DT:.2f} s"
+
+
 def summary(results) -> list[str]:
     lines = []
     for k, (side, outcome) in enumerate(results, 1):
@@ -62,7 +79,7 @@ def summary(results) -> list[str]:
             verdict = f"{loser} loses by {outcome.how}"
         lines.append(
             f"bout {k} · seed {outcome.seed} · A {side} · {verdict} at {outcome.time_s:.2f} s"
-            f" · {pull(outcome, side)}"
+            f" · {pull(outcome, side)} · {upright(outcome, side)}"
         )
     outcomes = [outcome for _, outcome in results]
     decided = [(side, o) for side, o in results if o.loser is not None]

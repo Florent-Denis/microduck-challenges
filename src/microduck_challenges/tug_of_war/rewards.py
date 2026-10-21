@@ -1,6 +1,6 @@
 """The Tug of War's own terms: where the learner's string end and the marker are, the new ground the
 marker wins towards the learner, the opponent as the critic reads it, which end of a bout an episode
-met, and the Arena's fall rule as a training-only termination.
+met, the Arena's fall rule as a training-only termination and the upright rule that replaces it.
 
 The string is the Arena's rope (env.add_string): its points are the sites p0 (the west end, tied to
 the learner) to p16 (the east end, tied to the opponent), where `arena.tug` records them. The marker
@@ -15,6 +15,7 @@ from mjlab.utils.lab_api.math import quat_apply
 
 STRING = "string/"  # the string's names, as arena.course.STRING
 MIDDLE = 8  # the point the marker is, as arena.tug.MIDDLE
+UPRIGHT_Z_M, UPRIGHT_TILT_DEG = 0.07, 45.0  # the upright rule's trunk height and tilt (env D22)
 
 
 def _string_end(data, offset: tuple) -> torch.Tensor:
@@ -97,9 +98,21 @@ class ArenaFall(ManagerTermBase):
         self._tipped_for = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
 
     def __call__(self, env, fall_gravity_z: float, hold_steps: int) -> torch.Tensor:
-        tipped = env.scene["robot"].data.projected_gravity_b[:, 2] > fall_gravity_z
+        return self._held(env.scene["robot"].data.projected_gravity_b[:, 2] > fall_gravity_z, hold_steps)
+
+    def _held(self, tipped: torch.Tensor, hold_steps: int) -> torch.Tensor:
         self._tipped_for.add_(1).mul_(tipped)
         return self._tipped_for >= hold_steps
 
     def reset(self, env_ids) -> None:
         self._tipped_for[env_ids] = 0
+
+
+class Down(ArenaFall):
+    """The upright rule (env D22) as a termination: the learner's trunk below `min_height_m` or its
+    projected gravity's z above `gravity_z` (tilted past an angle) for `hold_steps` straight control
+    steps, out on the step that completes the hold."""
+
+    def __call__(self, env, min_height_m: float, gravity_z: float, hold_steps: int) -> torch.Tensor:
+        data = env.scene["robot"].data
+        return self._held((data.root_link_pos_w[:, 2] < min_height_m) | (data.projected_gravity_b[:, 2] > gravity_z), hold_steps)

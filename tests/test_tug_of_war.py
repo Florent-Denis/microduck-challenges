@@ -128,9 +128,17 @@ def test_the_rings_ropes_and_posts_are_the_arenas_in_pieces(arena_model, trainin
             assert training_model.geom_size[t][0] == arena_model.geom_size[g][0]
 
 
+def _cfg_with_knobs(**knobs):
+    """The recipe built with these knobs, whatever challenge.toml says (as the hill's test does)."""
+    with pytest.MonkeyPatch.context() as patch:
+        real_params = ch.params
+        patch.setattr(ch, "params", lambda f: {**real_params(f), **knobs})
+        return tug.make_env_cfg()
+
+
 @pytest.fixture(scope="module")
 def cfg():
-    return tug.make_env_cfg()
+    return _cfg_with_knobs(stay_upright=0.0)
 
 
 def test_the_scene_and_solver_are_the_tugs(cfg, arena_model):
@@ -232,6 +240,51 @@ def test_a_fall_is_the_arenas_rule(cfg):
     assert seen[-2:] == [[False, False], [False, True]]   # out on the step that completes the hold
     term.reset(torch.tensor([1]))
     assert term(env, **params).tolist() == [False, False]
+
+
+def _posed_env(z, tilt_deg):
+    """One env whose learner's trunk is z m high and tilted tilt_deg: projected gravity z is -cos(tilt)."""
+    gravity = torch.tensor([[math.sin(math.radians(tilt_deg)), 0.0, -math.cos(math.radians(tilt_deg))]])
+    data = SimpleNamespace(root_link_pos_w=torch.tensor([[0.0, 0.0, z]]), projected_gravity_b=gravity)
+    return SimpleNamespace(num_envs=1, device="cpu", scene={"robot": SimpleNamespace(data=data)})
+
+
+@pytest.mark.parametrize("z, tilt_deg, fires_at", [(0.09, 40.0, None), (0.12, 0.0, None), (0.06, 55.0, 15), (0.036, 7.0, 15), (0.10, 46.0, 15)])
+def test_the_upright_rule_lets_a_puller_lean_and_ends_a_sitting_duck(z, tilt_deg, fires_at):
+    """A puller leaning 40° at 9 cm stays in; t10-500's sit (6 cm, 55°), a belly-flat crawler (3.6 cm, 7°) and a 46° lean go
+    down on the 15th straight step."""
+    env = _posed_env(z, tilt_deg)
+    term = rewards.Down(None, env)
+    fired = [bool(term(env, 0.07, -math.cos(math.radians(45.0)), 15)[0]) for _ in range(20)]
+    assert (fired.index(True) + 1 if any(fired) else None) == fires_at
+
+
+def test_a_down_count_restarts_on_a_reset():
+    env = _posed_env(0.05, 0.0)
+    term = rewards.Down(None, env)
+    args = (0.07, -math.cos(math.radians(45.0)), 15)
+    for _ in range(14):
+        term(env, *args)
+    term.reset(torch.tensor([0]))
+    assert not term(env, *args)[0]
+
+
+def test_stay_upright_ends_a_down_duck_and_costs_its_pits():
+    cfg = _cfg_with_knobs(stay_upright=1.0)
+    assert "down" in cfg.terminations and "fell" not in cfg.terminations
+    assert cfg.terminations["down"].params == {"min_height_m": 0.07, "gravity_z": pytest.approx(-0.7071068), "hold_steps": 15}
+    assert (cfg.rewards["down"].weight, cfg.rewards["down"].params) == (-50.0, {"terms": ("down",)})
+    assert cfg.rewards["out"].params == {"terms": ("in_pit",)}
+    off = _cfg_with_knobs(stay_upright=0.0)
+    assert "down" not in off.terminations and "down" not in off.rewards and off.rewards["out"].params == {"terms": ("in_pit", "fell")}
+    assert _cfg_with_knobs(stay_upright=2.0).rewards["down"].weight == -100.0
+
+
+def test_the_knobs_are_labelled_for_what_they_do():
+    knobs = tomllib.loads((Path(tug.__file__).parent / "challenge.toml").read_text())["params"]
+    assert knobs["upright_reward"]["label"] == "Keep the trunk level"
+    stay = knobs["stay_upright"]
+    assert (stay["label"], stay["value"], stay["min"], stay["max"]) == ("Stay upright", 0.0, 0.0, 2.0)
 
 
 def _duck(pos, quat, **fields):
@@ -408,7 +461,7 @@ def test_the_manifest_says_what_the_policy_reads():
 
 @pytest.fixture(scope="module")
 def live():
-    cfg = tug.make_env_cfg()
+    cfg = _cfg_with_knobs(stay_upright=0.0)
     cfg.scene.num_envs = 2
     env = ManagerBasedRlEnv(cfg, device="cpu")
     env.reset()
@@ -669,6 +722,31 @@ def test_a_bout_line_says_how_the_pull_went():
     assert check.pull(outcome, "east") == "taut at 0.76 s · A backed 0.0 cm by 2 s · marker -8.0 cm to A"
     held = _bout(1, None, "draw", 45.0, -0.485, 0.485)   # 0.97 m apart
     assert check.pull(held, "west") == "never taut · A backed 0.0 cm by 2 s · marker 0.0 cm to A"
+
+
+def _upright_bout(x=-0.5):
+    """100 frames: A (west) 50 standing (trunk z 0.10), 20 at z 0.05, 30 standing, its trunk at x."""
+    trace = np.zeros((2, 100, 21), dtype=np.float32)
+    trace[:, :, 3] = 1.0
+    trace[0, :, 0] = x
+    trace[0, :, 2] = 0.10
+    trace[0, 50:70, 2] = 0.05
+    return arena_tug.BoutOutcome(1, None, "draw", 2.0, trace, np.zeros((2, 1, 21)), np.zeros((100, arena_tug.STRING_POINTS, 3)),
+                                 np.zeros((1, arena_tug.STRING_POINTS, 3)))
+
+
+def test_a_bout_line_says_how_long_a_was_down():
+    """100 frames: 50 standing (z 0.10), 20 at z 0.05, 30 standing; A's trunk 0.5 m from the pit."""
+    from microduck_challenges.tug_of_war import check
+    assert check.upright(_upright_bout(), "west") == "on its feet 80 % · longest down 0.40 s"
+    assert check.upright(_upright_bout(x=-0.20), "west") == "on its feet 100 % · longest down 0.00 s"   # at the lip: left out
+    tilted = _upright_bout()
+    tilted.trace[0, :, 2] = 0.10
+    tilted.trace[0, 10:15, 4] = 0.5   # qx 0.5: tilted 60°
+    assert check.upright(tilted, "west") == "on its feet 95 % · longest down 0.10 s"
+    tilted.trace[1] = tilted.trace[0]
+    tilted.trace[1, :, 0] *= -1
+    assert check.upright(tilted, "east") == "on its feet 95 % · longest down 0.10 s"
 
 
 def test_the_summary_counts_who_lost_and_how():

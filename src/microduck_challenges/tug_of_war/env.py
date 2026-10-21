@@ -85,6 +85,15 @@ decisions, each commented where it is made:
       the ends the ducks' resets drew. A straight 1.00 m string overshoots ends closer than
       1 m by (1 - gap) / 2 at each end, at most 2 cm, and the ties take it in on the first steps
       (Plan H Task 4's probe watches them for NaN)
+  D22 stay_upright, a knob (challenge.toml): 0, what users get, lets a duck crouch, sit or lie as
+      the Arena allows and keeps D9's fall; above 0, `down` replaces `fell`: the learner's trunk
+      under UPRIGHT_Z_M (7 cm) or tilted past UPRIGHT_TILT_DEG (45°) for FALL_HOLD_S ends the
+      training episode and costs that many pits (-50 each, `down`). The numbers, measured on the
+      robot (owner, 2026-10-21): standing, the trunk stands 11-12 cm; a sweep of poses with only
+      the feet on the floor keeps it at 7.8 cm or more leaning back to 45°, so a puller may
+      lean; t10-500 sat at 5-6 cm, tilted 55°, its rear on the floor; a lying duck sits at
+      3.6 cm. A tilt past 60° held 0.3 s is past 45° first, so `fell` has nothing left to
+      catch. The owner's ducks train with it on; check.py reads how long A was down
 """
 
 import math
@@ -125,7 +134,10 @@ from .opponent import OpponentActionCfg
 from .rewards import (
     MIDDLE,
     STRING,
+    UPRIGHT_TILT_DEG,
+    UPRIGHT_Z_M,
     ArenaFall,
+    Down,
     MarkerGround,
     ended_by,
     marker_x,
@@ -432,6 +444,7 @@ def make_env_cfg(
 
     # The knobs a novice tunes, from challenge.toml beside this file.
     knobs = challenge.params(__file__)
+    stay_upright = knobs["stay_upright"]
 
     std_standing = {
         # Lower body — tighter to keep the robot in home pose when standing
@@ -638,7 +651,9 @@ def make_env_cfg(
     # Either pit ends the episode (terminations below), as it ends a bout on the
     # Arena (D9): the learner's or, training only, its fall costs `out`; the
     # opponent's pays `win`. Both in on one step pay nothing, the rarest end.
-    cfg.rewards["out"] = RewardTermCfg(func=ended_by, weight=-50.0, params={"terms": ("in_pit", "fell")})
+    cfg.rewards["out"] = RewardTermCfg(func=ended_by, weight=-50.0, params={"terms": ("in_pit",) if stay_upright else ("in_pit", "fell")})
+    if stay_upright:
+        cfg.rewards["down"] = RewardTermCfg(func=ended_by, weight=-50.0 * stay_upright, params={"terms": ("down",)})
     cfg.rewards["win"] = RewardTermCfg(func=ended_by, weight=50.0, params={"terms": ("opponent_in_pit",)})
 
     # Action smoothness: stage-0 value; the action_rate_weight curriculum below
@@ -681,14 +696,22 @@ def make_env_cfg(
         func=mdp.root_height_below_minimum,
         params={"minimum_height": -PIT_DROP_M, "asset_cfg": SceneEntityCfg("opponent")},
     )
-    # TRAINING ONLY (D9): a fall ends a training episode so the duck keeps
-    # learning to stand and pull; the Arena judges only the pit. The Arena's
-    # fall rule: gravity z above FALL_GRAVITY_Z for FALL_HOLD_S of straight
-    # control steps.
-    cfg.terminations["fell"] = TerminationTermCfg(
-        func=ArenaFall,
-        params={"fall_gravity_z": FALL_GRAVITY_Z, "hold_steps": round(FALL_HOLD_S / ctrl_dt)},
-    )
+    # TRAINING ONLY (D9, D22): going down ends a training episode so the duck
+    # keeps learning to stand and pull; the Arena judges only the pit. The
+    # Arena's fall rule (gravity z above FALL_GRAVITY_Z for FALL_HOLD_S of
+    # straight control steps), or, with stay_upright, the upright rule (D22).
+    hold_steps = round(FALL_HOLD_S / ctrl_dt)
+    if stay_upright:
+        cfg.terminations["down"] = TerminationTermCfg(
+            func=Down,
+            params={"min_height_m": UPRIGHT_Z_M, "gravity_z": -math.cos(math.radians(UPRIGHT_TILT_DEG)),
+                    "hold_steps": hold_steps},
+        )
+    else:
+        cfg.terminations["fell"] = TerminationTermCfg(
+            func=ArenaFall,
+            params={"fall_gravity_z": FALL_GRAVITY_Z, "hold_steps": hold_steps},
+        )
 
     # Events
     # BAM (mjlab_frictionloss branch) writes per-env dof_frictionloss/dof_damping

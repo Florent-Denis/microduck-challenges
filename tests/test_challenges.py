@@ -46,6 +46,7 @@ CHALLENGES = {
         "pull_reward": ("marker_ground", 3.1),
         "back_reward": ("track_linear_velocity", 2.3),
         "upright_reward": ("upright", 1.7),
+        "stay_upright": (None, 1.0),
     },
 }
 

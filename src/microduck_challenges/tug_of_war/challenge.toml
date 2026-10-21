@@ -28,7 +28,16 @@ min   = 0.0
 max   = 4.0
 
 [params.upright_reward]
-label = "Stay upright"
+label = "Keep the trunk level"
 value = 1.0
 min   = 0.0
 max   = 4.0
+
+# 0 lets the duck crouch, sit or lie as the Arena allows; above 0, going down (trunk
+# under 7 cm or tilted past 45° for 0.3 s) ends the training episode and costs that
+# many pits.
+[params.stay_upright]
+label = "Stay upright"
+value = 0.0
+min   = 0.0
+max   = 2.0

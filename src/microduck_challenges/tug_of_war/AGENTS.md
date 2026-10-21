@@ -84,7 +84,8 @@ opponent runs as the Arena runs it, with no randomisation: its servos on the Are
 |---|---|---|---|---|
 | `pull_reward` | Win ground | 2.0 | 0.5–5.0 | `marker_ground` weight |
 | `back_reward` | Walk backwards | 3.0 | 0.0–4.0 | `track_linear_velocity` weight |
-| `upright_reward` | Stay upright | 1.0 | 0.0–4.0 | `upright` weight |
+| `upright_reward` | Keep the trunk level | 1.0 | 0.0–4.0 | `upright` weight |
+| `stay_upright` | Stay upright | 0.0 | 0.0–2.0 | cost in pits of going down; above 0, `down` (trunk under 7 cm or tilted past 45° for 0.3 s) replaces `fell` |
 
 Do not change, or the Arena cannot race the policy or the tests fail:
 
