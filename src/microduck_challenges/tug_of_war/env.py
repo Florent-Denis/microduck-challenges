@@ -54,6 +54,12 @@ decisions, each commented where it is made:
       t6 and t7 learned the walk back only with no load, by iteration 250; switching at a reset
       never yanks a running bout. A played bout (`play`) is taut from its first step: its env
       counts steps from 0
+  D18 the course's boxes come in tiles at most TILE_M (2 m) along x and y, their tops and
+      contacts the Arena's. Where a duck lies flat on a box, mujoco_warp's box-mesh collision can
+      put the contact off the duck, along an edge of that box, by several times its length: under
+      the Arena's 21.85 x 40.9 m platforms it landed 60 to 130 m away and the solver turned the
+      whole world NaN (t8, t9: nan_state on both ducks at once, the frozen opponent lying head
+      down for most of a bout). On 2 m tiles it lands within 8 m and the world stays finite
 """
 
 import math
@@ -114,6 +120,8 @@ PIT_DROP_M = 0.05                                          # arena/tug.py
 STRING_SITE = "string_end"
 
 STRING = "string"  # the spatial tendon, as arena.course.STRING
+
+TILE_M = 2.0  # the longest a course tile is along x or y (D18)
 
 ROBOT = "robot/"  # the prefix mjlab attaches the learner entity under
 OPPONENT = "opponent/"  # and the opponent's
@@ -196,6 +204,17 @@ def course_boxes() -> list[tuple[str, tuple, tuple]]:
     ]
 
 
+def tiles(boxes: list[tuple[str, tuple, tuple]]) -> list[tuple[str, tuple, tuple]]:
+    """Each box `(name, pos, half_extents)` cut into equal tiles at most TILE_M along x and y, named
+    `name_i_j`, each as high as the box (D18)."""
+    out = []
+    for name, (x, y, z), (hx, hy, hz) in boxes:
+        nx, ny = math.ceil(2 * hx / TILE_M), math.ceil(2 * hy / TILE_M)
+        out += [(f"{name}_{i}_{j}", (x - hx + (2 * i + 1) * hx / nx, y - hy + (2 * j + 1) * hy / ny, z),
+                 (hx / nx, hy / ny, hz)) for i in range(nx) for j in range(ny)]
+    return out
+
+
 def west_start() -> tuple[float, float]:
     """The west duck's trunk (x, y), facing east: its string end on y = 0, half the string
     west of the pit's centre."""
@@ -215,12 +234,12 @@ def tug_scene(spec: mujoco.MjSpec) -> None:
     """mjlab's `SceneCfg.spec_fn`: the Arena's bout, built on the scene once both ducks are in
     (`arena.course.compile_tug`, Plan F Decisions 1 and 2).
 
-    The course is a static body named `terrain`, as mjlab's foot contact sensor expects. Each
-    duck, `robot` and `opponent`, carries a string end, a site at the base of its neck, and the
-    tendon `string` ties the two, limited to [0, STRING_M].
+    The course is a static body named `terrain`, as mjlab's foot contact sensor expects, its boxes
+    in tiles (D18). Each duck, `robot` and `opponent`, carries a string end, a site at the base of
+    its neck, and the tendon `string` ties the two, limited to [0, STRING_M].
     """
     terrain = spec.worldbody.add_body(name="terrain")
-    for name, pos, size in course_boxes():
+    for name, pos, size in tiles(course_boxes()):
         terrain.add_geom(name=name, type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size)
     for prefix in (ROBOT, OPPONENT):
         spec.body(prefix + "trunk_base").add_site(name=prefix + STRING_SITE, pos=STRING_OFFSET)
@@ -333,7 +352,8 @@ def make_env_cfg(
 
     # The course and the string are the Arena's tug, built on the scene by tug_scene
     # (D1–D4): no mjlab terrain has a pit, and without one every env origin is 0, so
-    # each world holds the course and the string ends at the Arena's coordinates.
+    # each world holds the course and the string ends at the Arena's coordinates. Its
+    # boxes come in 2 m tiles, which keep the world finite (D18).
     cfg.scene.terrain = None
     cfg.scene.spec_fn = tug_scene
 

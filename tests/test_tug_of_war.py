@@ -63,17 +63,27 @@ def _static_colliders(model):
             if model.body_weldid[model.geom_bodyid[g]] == 0 and (model.geom_contype[g] or model.geom_conaffinity[g])}
 
 
-def test_the_course_compiles_like_the_arenas(arena_model, training_model):
-    names = {n for n, _, _ in tug.course_boxes()}
-    assert _static_colliders(training_model) == names == _static_colliders(arena_model)  # no floor plane left
+def test_the_course_tiles_the_arenas(arena_model, training_model):
+    """Each of the Arena's boxes comes as tiles at most TILE_M along x and y (D18): together they fill it, each
+    with its height, its top and its contacts."""
+    boxes, tiles = _static_colliders(arena_model), _static_colliders(training_model)
+    assert boxes == {n for n, _, _ in tug.course_boxes()} == {n.rsplit("_", 2)[0] for n in tiles}  # no floor plane left
     datas = [mujoco.MjData(m) for m in (arena_model, training_model)]
     for m, d in zip((arena_model, training_model), datas):
         mujoco.mj_forward(m, d)
-    for name in names:
-        a, t = arena_model.geom(name).id, training_model.geom(name).id
-        np.testing.assert_allclose(datas[1].geom_xpos[t], datas[0].geom_xpos[a], atol=1e-12, err_msg=name)
-        for field in CONTACT:
-            np.testing.assert_allclose(getattr(training_model, field)[t], getattr(arena_model, field)[a], err_msg=f"{name} {field}")
+    for name in boxes:
+        a = arena_model.geom(name).id
+        centre, half = datas[0].geom_xpos[a], arena_model.geom_size[a]
+        area = 0.0
+        for t in (training_model.geom(n).id for n in tiles if n.rsplit("_", 2)[0] == name):
+            pos, size = datas[1].geom_xpos[t], training_model.geom_size[t]
+            assert (2 * size[:2] <= tug.TILE_M + 1e-9).all(), name
+            assert (pos - size >= centre - half - 1e-9).all() and (pos + size <= centre + half + 1e-9).all(), name
+            assert (pos[2], size[2]) == pytest.approx((centre[2], half[2]), abs=1e-12)
+            area += 4 * size[0] * size[1]
+            for field in set(CONTACT) - {"geom_size"}:
+                np.testing.assert_allclose(getattr(training_model, field)[t], getattr(arena_model, field)[a], err_msg=f"{name} {field}")
+        assert area == pytest.approx(4 * half[0] * half[1], rel=1e-9), name
 
 
 @pytest.fixture(scope="module")
@@ -402,6 +412,24 @@ def test_a_bout_steps(live):
     for _ in range(25):
         obs, *_ = live.step(torch.zeros(2, 14))
     assert obs["actor"].shape == (2, 61) and torch.isfinite(obs["critic"]).all()
+
+
+# The east duck's qpos (trunk, then its joints) in a NaN world t9-250's learner met on CPU (taut, seed 6, step 107): fallen
+# forward, its head shell flat on the platform. Under one 21.85 x 40.9 m platform box, mujoco_warp put that contact 95 m
+# away and the step went NaN.
+LYING = (0.628722, 0.022052, 0.047935, 0.040967, -0.411265, 0.012048, 0.910515, 0.079293, -0.131604, -0.048572, -0.478089,
+         0.528811, 0.077669, 1.153934, -0.110056, 0.134809, 0.034916, 0.092652, -0.059213, 0.280138, -0.401073)
+
+
+def test_a_duck_lying_on_the_platform_keeps_the_world_finite(live):
+    live.reset()
+    model = live.sim.mj_model
+    adr = model.jnt_qposadr[model.body("opponent/trunk_base").jntadr[0]]
+    live.sim.data.qpos[0, adr:adr + len(LYING)] = torch.tensor(LYING)
+    live.sim.data.qvel[0] = 0.0
+    live.sim.forward()
+    live.step(torch.zeros(2, 14))
+    assert not live.termination_manager.get_term("opponent_nan_state")[0]
 
 
 def _relu_actor(tmp_path):
