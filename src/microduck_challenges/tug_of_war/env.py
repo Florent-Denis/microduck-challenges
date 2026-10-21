@@ -80,8 +80,9 @@ decisions, each commented where it is made:
   D20 the ring is the Arena's (Plan G Task 2): ropes and posts are rigid capsules, backstops
       close the gaps between them, the pit crosses the ring from rope to rope
   D21 every reset lays the string straight between the ducks' actual string ends, centred on
-      them (`reset_string`): mujoco_warp's reset_data puts it back between the nominal starts, up
-      to 2 cm off the jittered ducks (D12). A straight 1.00 m string overshoots ends closer than
+      them (`reset_string`): mujoco_warp's reset_data puts it back straight and still between the
+      nominal starts, up to 2 cm off the jittered ducks (D12), and the event moves its root onto
+      the ends the ducks' resets drew. A straight 1.00 m string overshoots ends closer than
       1 m by (1 - gap) / 2 at each end, at most 2 cm, and the ties take it in on the first steps
       (Plan H Task 4's probe watches them for NaN)
 """
@@ -391,10 +392,12 @@ def add_string(spec: mujoco.MjSpec, a, b) -> None:
 
 def reset_string(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
     """A reset event, after both ducks' (D21): the string straight between their string ends as
-    their resets placed them, its root, the middle point, centred between them, every hinge at 0,
-    every string velocity 0. Each end is the duck's free-joint position plus STRING_OFFSET turned
-    by its quaternion, read off qpos: the sites' kinematics are stale until the reset's forward.
-    The root's quaternion turns its +x onto the west end to the east end, a yaw then a pitch."""
+    their resets placed them. mjlab's reset (mujoco_warp's reset_data) has already put every hinge
+    at 0, the string straight, and every velocity at 0, so this only places the root, the middle
+    point, centred between the two ends. Each end is the duck's free-joint position plus
+    STRING_OFFSET turned by its quaternion, read off qpos: the sites' kinematics are stale until
+    the reset's forward. The root's quaternion turns its +x onto the west end to the east end, a
+    yaw then a pitch."""
     data = env.sim.data
     ends = []
     for name in ("robot", "opponent"):
@@ -403,12 +406,9 @@ def reset_string(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
     west, east = ends
     direction = (east - west) / (east - west).norm(dim=-1, keepdim=True)
     yaw, pitch = torch.atan2(direction[:, 1], direction[:, 0]), -torch.asin(direction[:, 2])
-    root = env.sim.mj_model.joint(f"{STRING}root")
-    q, v, hinges = int(root.qposadr[0]), int(root.dofadr[0]), 2 * (STRING_SEGMENTS - 1)
+    q = int(env.sim.mj_model.joint(f"{STRING}root").qposadr[0])
     data.qpos[env_ids, q:q + 3] = (west + east) / 2
     data.qpos[env_ids, q + 3:q + 7] = quat_from_euler_xyz(torch.zeros_like(yaw), pitch, yaw)
-    data.qpos[env_ids, q + 7:q + 7 + hinges] = 0.0  # the string's joints follow its root's: one subtree
-    data.qvel[env_ids, v:v + 6 + hinges] = 0.0
 
 
 def heading_error(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -508,10 +508,11 @@ def make_env_cfg(
 
     # The Arena's solver (D7, arena/course.py): implicitfast, 10/20 iterations,
     # 0.005 s physics steps, 4 per 0.02 s control step. nconmax and njmax are
-    # buffers, not physics. Every world's CCD scratch is sized from nconmax: the
-    # string peaks at 31 to 40 contacts a world (42 in the Arena), and 400 asked
-    # 4.4 GB more of the L4 at 4096 envs (t8, t9). The string peaks at 196
-    # constraint rows a world.
+    # buffers, not physics: with the string, a whole world (both ducks, the
+    # string, the course) peaks at 31 to 40 contacts (42 in the Arena), under
+    # 200, and at 196 constraint rows, under 1500 (the rope study). Every world's
+    # CCD scratch is sized from nconmax: 400 asked 4.4 GB more of the L4 at 4096
+    # envs (t8, t9).
     cfg.sim.nconmax = 200
     cfg.sim.njmax = 1500
     cfg.sim.mujoco.integrator = "implicitfast"

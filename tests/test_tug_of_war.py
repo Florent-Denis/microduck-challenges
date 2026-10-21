@@ -349,7 +349,7 @@ def _string_dofs(model):
 
 
 def test_the_string_is_the_arenas(arena_model, training_model):
-    """Every string body, joint, dof, geom and site, both ties and both excludes, as compile_tug builds them."""
+    """Every string body, joint, dof, geom and site, its tree, both ties and both excludes, as compile_tug builds them."""
     for kind, fields in STRING_FIELDS.items():
         names = [n for n in _names(arena_model, kind) if n.startswith(tug.STRING)]
         assert names == [n for n in _names(training_model, kind) if n.startswith(tug.STRING)] and names
@@ -360,9 +360,15 @@ def test_the_string_is_the_arenas(arena_model, training_model):
     for field in ("dof_damping", "dof_armature"):
         np.testing.assert_array_equal(getattr(training_model, field)[_string_dofs(training_model)],
                                       getattr(arena_model, field)[_string_dofs(arena_model)])
-    ties = lambda m, prefixes: [(m.site(m.eq_obj1id[e]).name.replace(prefixes[0], "").replace(prefixes[1], "#"),
+    named = lambda name, prefixes: name.replace(prefixes[0], "").replace(prefixes[1], "#")   # "#" marks the east duck
+    tree = lambda m, prefixes: [(m.body(b).name, named(m.body(m.body_parentid[b]).name, prefixes))
+                                for b in range(m.nbody) if m.body(b).name.startswith(tug.STRING)]
+    ties = lambda m, prefixes: [(named(m.site(m.eq_obj1id[e]).name, prefixes),
                                  m.site(m.eq_obj2id[e]).name, tuple(m.eq_solref[e]), tuple(m.eq_solimp[e]), int(m.eq_type[e])) for e in range(m.neq)]
-    assert ties(training_model, ("robot/", "opponent/")) == ties(arena_model, ("", "duck1/"))   # "#" marks the east neck
+    excludes = lambda m, prefixes: sorted((named(m.body(s >> 16).name, prefixes), named(m.body(s & 0xFFFF).name, prefixes))
+                                          for s in m.exclude_signature)   # MuJoCo's (body1 << 16) + body2
+    for wiring in (tree, ties, excludes):
+        assert wiring(training_model, ("robot/", "opponent/")) == wiring(arena_model, ("", "duck1/"))
     assert training_model.nexclude == arena_model.nexclude == 2 and training_model.ntendon == 0
 
 
@@ -420,14 +426,17 @@ def test_the_opponent_starts_where_the_arenas_east_duck_does(live):
 
 
 def test_a_reset_lays_the_string_between_the_ducks(live):
-    live.reset()
     data, model = live.sim.data, live.sim.mj_model
+    for _ in range(5):   # the string has swung and is moving when the reset comes
+        live.step(torch.full((2, 14), 0.3))
+    assert data.qvel[:, _string_dofs(model)].any()
+    live.reset()
     site = lambda name: data.site_xpos[:, model.site(name).id]
     points = torch.stack([site(f"{tug.STRING}p{k}") for k in range(17)], dim=1)          # (2, 17, 3)
     west, east = site("robot/string_end"), site("opponent/string_end")
     gap = (east - west).norm(dim=-1)                                                         # 0.96–1.00 m: the starts' jitter
     assert (points[:, 8] - (west + east) / 2).norm(dim=-1).max() <= 1e-5                     # centred between the ties
-    over = (1.0 - gap) / 2 + 1e-5                                                            # a straight 1 m string overshoots closer ties
+    over = (1.0 - gap).abs() / 2 + 1e-5                                                      # a straight 1 m string misses ties off 1 m apart
     assert ((points[:, 0] - west).norm(dim=-1) <= over).all() and ((points[:, 16] - east).norm(dim=-1) <= over).all()
     line = points[:, 16] - points[:, 0]
     off = torch.linalg.cross(points - points[:, :1], line[:, None].expand_as(points)).norm(dim=-1) / line.norm(dim=-1)[:, None]
