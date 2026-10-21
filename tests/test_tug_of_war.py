@@ -463,15 +463,16 @@ def test_the_opponent_net_is_its_onnx():
     np.testing.assert_allclose(ours, theirs, atol=1e-5)
 
 
-def test_the_learner_can_start_as_the_reference_duck():
-    """`--agent.actor.class-name` names it; PPO builds the actor from RL_CFG as below. The rows are
-    observations as the reference's normalizer saw them (its constant command slots constant)."""
+def test_the_learner_starts_as_the_reference_duck():
+    """RL_CFG names its actor; PPO builds it from RL_CFG as below. The rows are observations as the
+    reference's normalizer saw them (its constant command slots constant)."""
     normalize = opponent.load_actor(opponent.REFERENCE)[0]
     noise = torch.from_numpy(np.random.default_rng(0).normal(size=(4096, 61)).astype(np.float32))
     rows = normalize.mean + normalize.std * noise
     obs = TensorDict({"actor": rows}, batch_size=[len(rows)])
     cfg = tug.RL_CFG.actor
-    actor = resolve_callable("microduck_challenges.tug_of_war.opponent:ReferenceActor")(
+    assert resolve_callable(cfg.class_name) is opponent.ReferenceActor
+    actor = resolve_callable(cfg.class_name)(
         obs, {"actor": ["actor"]}, "actor", 14, hidden_dims=cfg.hidden_dims, activation=cfg.activation,
         obs_normalization=cfg.obs_normalization, distribution_cfg=dict(cfg.distribution_cfg))
     session = onnxruntime.InferenceSession(str(opponent.REFERENCE), providers=["CPUExecutionProvider"])
@@ -482,6 +483,14 @@ def test_the_learner_can_start_as_the_reference_duck():
         # PPO's update at the first rollout step, every env at one state: the reference's statistics hold.
         actor.update_normalization(TensorDict({"actor": rows[:1].expand(4096, -1)}, batch_size=[4096]))
         np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-2)
+
+
+def test_the_recipe_stops_after_the_warm_starts_peak():
+    """The workshop trains challenge.toml's [recipe] with RL_CFG as it is. Started as the reference duck, t10
+    dragged it into the pit by 500 (+139.6 cm) and lay prone by 1000 (-17.6 cm): the run stops there, and the
+    best of its checkpoints at 250, 500, 750 and 1000 is kept, not the last."""
+    recipe = tomllib.loads((Path(tug.__file__).parent / "challenge.toml").read_text())["recipe"]
+    assert recipe["max_iterations"] == 1000 and tug.RL_CFG.save_interval == 250
 
 
 def test_a_graph_the_loader_does_not_know_is_refused(tmp_path):

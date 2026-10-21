@@ -42,22 +42,40 @@ positions from the default pose (14), joint velocities one control step old (14)
 then the 13 command numbers: twist (3), head (4), body (6). Joint order: left leg (hip_yaw,
 hip_roll, hip_pitch, knee, ankle), neck_pitch, head_pitch, head_yaw, head_roll, right leg (same
 order). The Arena simulates the same robot with the same BAM actuator model as training (MuJoCo,
-implicitfast integrator, 10/20 contact solver). The task trains the learner (always the west duck) against
-`reference.onnx`, the frozen reference duck, in the Arena's bout: both ducks on one string over the
-pit, 45 s, only the pit decides. For its first 250 iterations the string is slack (the duck learns
-to walk back with no load), then it is taut as in the Arena. A `fell` termination (the Arena's
-fall rule) ends a training episode only. `win` pays when the opponent drops into the pit, `out`
-costs when the learner does, and `marker_ground` pays the ground the marker wins towards it.
+implicitfast integrator, 10/20 contact solver).
+
+## The recipe
+
+The task trains the learner (always the west duck) against `reference.onnx`, the frozen reference
+duck, in the Arena's bout: both ducks on one string over the pit, 45 s, only the pit decides. The
+opponent runs as the Arena runs it, with no randomisation.
+
+- **The learner starts as the reference duck** (`ReferenceActor`, `RL_CFG`'s actor: the reference's
+  layers and observation normalizer, action noise std 0.3, the critic fresh). Trained from scratch it
+  plateaus or lies flat: t8r reached +12.6 cm at iteration 1000 and +10.5 at 1500, t9r lay on its
+  belly and held, -18.3 cm at 1000. Started as a duck that already backs and pulls, t10 dragged the
+  reference into the pit in 10 bouts of 10 by iteration 500 (+139.6 cm). To train from scratch
+  anyway, add `--agent.actor.class-name MLPModel`.
+- **1000 iterations, a checkpoint every 250**: the warm-started duck peaks early, then decays (see
+  "Following a run"). Keep the best checkpoint, not the last.
+- **The string is slack for the first 250 iterations** (`SLACK_M` until `TAUT_FROM_ITERATION`), then
+  taut as in the Arena: from scratch, a duck learns the walk back with no load first. A learner that
+  starts as the reference already walks back: t11 trained taut from iteration 0
+  (`--env.events.string-limit.params.taut-from-step 0`) and won sooner (+140.5 cm at 250, the
+  reference in the pit in 13.8 s median), though t10, with the slack phase, beat it 9-1 head to head.
+- A `fell` termination (the Arena's fall rule) ends a training episode only. `win` pays when the
+  opponent drops into the pit, `out` costs when the learner does, and `marker_ground` pays the
+  ground the marker wins towards it.
 
 ## Files
 
 | File | What it holds | Change it? |
 |---|---|---|
 | `challenge.toml` `[params]` | The three knobs below | Yes, first. Keep each value within its `min`/`max` (the workshop refuses others) |
-| `challenge.toml` `[recipe]` | `num_envs` 4096, `max_iterations` 3000, `seed` 1 | Yes, when agreed with the user |
-| `env.py` | The whole environment: rewards, terminations, the opponent's wiring, domain randomization, `RL_CFG` (network, PPO, checkpoints every 250 iterations) | Yes, once the knobs are not enough |
+| `challenge.toml` `[recipe]` | `num_envs` 4096, `max_iterations` 1000, `seed` 1 | Yes, when agreed with the user |
+| `env.py` | The whole environment: rewards, terminations, the opponent's wiring, domain randomization, `RL_CFG` (the actor, starting as the reference duck; PPO; checkpoints every 250 iterations) | Yes, once the knobs are not enough |
 | `rewards.py` | The tug's own terms: the marker's new ground, the pit margin, the Arena's fall rule | Yes |
-| `opponent.py`, `reference.onnx` | The frozen opponent: the reference duck's network and the action term that drives it; `ReferenceActor`, the learner starting as that duck | No |
+| `opponent.py`, `reference.onnx` | The frozen opponent: the reference duck's network and the action term that drives it; `ReferenceActor`, the learner's actor, starting as that duck | No |
 | `check.py` | Plays two policies against each other (B defaults to the reference) | No |
 | `tasks.py`, `event`/`task`/`kind` in `challenge.toml` | Registration with mjlab and the Arena | No |
 
@@ -76,8 +94,7 @@ Do not change, or the Arena cannot race the policy or the tests fail:
   `opponent_in_pit`) and `fell`, which ends a *training* episode only (the Arena judges the pit alone;
   without it an untrained duck lies on its side from 1 s and never learns to stand);
 - `opponent.py` and `reference.onnx` (the same bytes the Arena rates against; any other opponent
-  trains a duck the rating does not measure), and the slack string until iteration 250 (`SLACK_M`,
-  `TAUT_FROM_ITERATION`): the duck learns to walk back with no load, then meets the opponent;
+  trains a duck the rating does not measure);
 - the constants copied from the Arena at the top of `env.py` (course, string, bout length, fall rule): the
   job installs no Arena, and `tests/test_tug_of_war.py` pins each against it. If the Arena's event
   changes, change the Arena first, then here, then the parity tests;
@@ -128,15 +145,11 @@ Agree with the user before the first run:
 
    ```bash
    # local NVIDIA GPU
-   uv run train Mjlab-TugOfWar-MicroDuck --env.scene.num-envs 4096 --agent.max-iterations 3000 \
+   uv run train Mjlab-TugOfWar-MicroDuck --env.scene.num-envs 4096 --agent.max-iterations 1000 \
        --agent.seed 1 --agent.logger tensorboard --agent.run-name <name> > logs/<name>.log 2>&1 &
    # Hugging Face Jobs: the same, plus
    #   --hf-jobs --no-wandb --namespace <user> --ckpt-repo <user>/mjlab-tugofwar-microduck-<name>
    ```
-
-   To start the learner as the reference duck (its actor and normalizer, action noise std 0.3, the
-   critic fresh) instead of from scratch, add
-   `--agent.actor.class-name microduck_challenges.tug_of_war.opponent:ReferenceActor`.
 
    A local run writes `logs/rsl_rl/tug_of_war/<YYYY-MM-DD_HH-MM-SS>_<name>/`: `model_<N>.pt` every
    250 iterations and the last one, TensorBoard events, `provenance.json`. A job uploads the same
@@ -156,15 +169,21 @@ Agree with the user before the first run:
   import sys; from tensorboard.backend.event_processing.event_accumulator import EventAccumulator as E
   ea = E(sys.argv[1], size_guidance={'scalars': 0}).Reload()
   for tag in sys.argv[2:]: print(tag, [(e.step, round(e.value, 3)) for e in ea.Scalars(tag)][-8:])
-  " logs/rsl_rl/tug_of_war/<run> Train/mean_episode_length Episode_Termination/in_pit Episode_Termination/fell Episode_Reward/marker_ground Episode_Reward/win
+  " logs/rsl_rl/tug_of_war/<run> Train/mean_episode_length Episode_Termination/in_pit Episode_Termination/opponent_in_pit Episode_Termination/fell Episode_Reward/marker_ground Episode_Reward/win
   ```
 
-  Healthy: `marker_ground` stays positive and grows, and after iteration 250 (the string goes taut)
-  `win` rises as `in_pit` and `fell` fall; `Train/mean_episode_length` stays near 2275 control steps
-  (45.5 s, the settle plus the bout) until a pit ends episodes sooner. Expect a dip at iteration 250,
-  where the string goes taut. Warning signs: total reward rising while `marker_ground` stays flat;
-  `fell` climbing; `nan_state` terminations. A run that has collapsed and not recovered within about
-  500 iterations: tell the user and propose stopping it.
+  Healthy, starting as the reference duck (the default): while the string is slack (to 250)
+  `marker_ground` drifts down and the duck may lie down (t10 rated -11.2 cm at 250). Once it is taut,
+  `win`, `marker_ground` and `opponent_in_pit` jump and the opponent's pit cuts episodes short (t10 at
+  500: `win` 0.022, `marker_ground` 0.21, `opponent_in_pit` 3.25, episodes 1310 control steps). The
+  peak comes between 250 and 750, then it decays: by about 1000 the duck lies prone and holds (t10:
+  `win` 0.002, `marker_ground` 0.12, `opponent_in_pit` 0.21, episodes back near 2275 control steps,
+  45.5 s, the settle plus the bout). That decay is the known shape, not a broken run: rate the
+  checkpoints at 250, 500, 750 and 1000 with `arena score` or the workshop and keep the best, not the
+  last. From scratch (`MLPModel`), `marker_ground` stays low and grows slowly, with a dip at 250
+  where the string goes taut. Warning signs: `fell` or the learner's `in_pit` climbing; `nan_state`
+  in more than a few worlds per step (the term counts worlds). A run that has collapsed and not
+  recovered within about 500 iterations: tell the user and propose stopping it.
 
 ### Judging every checkpoint
 
@@ -186,9 +205,9 @@ The curves are not the score. Judge each checkpoint with the Arena's own evaluat
 
   `arena score` prints one line per bout (five), then `rating: X.X cm`.
 
-Pick by rating: the highest. The best checkpoint is often not the last. To see how two policies pull
-against each other, play them (bout k on seed k, sides swapped after each, the first policy starting
-west; the second defaults to the reference duck):
+Pick by rating: the highest. With this recipe the best checkpoint is early, not the last (t10: 500
+of 1000). To see how two policies pull against each other, play them (bout k on seed k, sides
+swapped after each, the first policy starting west; the second defaults to the reference duck):
 
 ```bash
 uv run --frozen --group workshop python -m microduck_challenges.tug_of_war.check A.onnx [B.onnx] --bouts 10
@@ -223,8 +242,8 @@ fork, never `pollen-robotics`; the workshop's home sets that up).
 
 ## What is known about this challenge
 
-All numbers are from the Mac, indicative: the Space (x86) rates differently. The ratings below are the
-old bench's, in newtons; the Arena now rates in centimetres against the reference.
+All numbers are from the Mac, indicative: the Space (x86) rates differently. t1 to t7's ratings are the
+old bench's, in newtons; from t8 on, the Arena's, in centimetres against the reference.
 
 - t1 (the recipe as first written: the bench's winch, a fall loses): twelve trained checkpoints sat
   between 5.38 and 6.32 N, a plateau from iteration 250 on. Both ducks of a bout between two of them
@@ -240,7 +259,17 @@ old bench's, in newtons; the Arena now rates in centimetres against the referenc
   zero policy rated 5.23 N, t1's best 6.32 N, a ceiling near 7 N), so the bench measured lying, not
   pulling. Training now runs against the reference duck in the Arena's bout, and the rating is
   bouts against it.
-- t8, t9 (the recipe as it stands, seeds 1 and 2): see the training ledger when they land.
+- t8r, t9r (against the reference, from scratch, seeds 1 and 2): t8r crouched and held, winning
+  every bout on the marker by about 12 cm: +12.6 cm at 1000, +10.5 at 1500, a plateau. t9r lay on its
+  belly from 2 s into each bout (a level trunk on the floor is not a fall) and held: -18.3 cm at 1000.
+- t10, t11 (starting as the reference duck, seeds 3 and 4; t11 with the string taut from iteration
+  0): each leans back about 55° and walks the reference over the pit's edge, 10 bouts of 10: t10 at
+  500 +139.6 cm (median 20.6 s), t11 at 250 +140.5 cm (median 13.8 s). Then both decay into lying
+  prone: at 1000 t10 rated -17.6 cm and t11 +19.7 cm, and neither drags the reference in. Head to
+  head, t10-500 beat t11-250 9-1 and every other passing checkpoint: it is the pick.
+- The course comes in 2 m tiles (`TILE_M`): on the Arena's 40 m boxes mujoco_warp put a lying duck's
+  contact 60 to 130 m away and whole worlds went NaN (t8, t9). Keep the tiles if you edit the course.
+- `nconmax` is 200 contacts a world (a bout peaks at 19): 400 ran an L4 out of memory at 4096 envs.
 
 ## The competition
 

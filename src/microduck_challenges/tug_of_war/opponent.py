@@ -6,7 +6,7 @@ the `opponent` entity with it: an action term that takes none of the agent's act
 it at the start of each step, on the state the learner's observation saw, so both ducks act on
 one state, as in the Arena's `runner._step`. It builds the 61 numbers `runner._observe` gives a
 duck and sets the opponent's joint targets as the learner's are set, into its own BAM servos.
-`ReferenceActor` lets the learner start as the same duck (Plan F, lever 5).
+`ReferenceActor`, the learner's actor in RL_CFG, starts it as the same duck (Plan F, lever 5).
 The HF job installs no Arena: nothing here imports it; tests/test_tug_of_war.py pins each copy.
 """
 
@@ -72,8 +72,8 @@ def load_actor(path: Path) -> torch.nn.Sequential:
 
 
 class ReferenceActor(MLPModel):
-    """The learner's actor, starting as the reference duck: `--agent.actor.class-name
-    microduck_challenges.tug_of_war.opponent:ReferenceActor` (RL_CFG's MLPModel starts from scratch).
+    """The learner's actor (RL_CFG's), starting as the reference duck (`--agent.actor.class-name
+    MLPModel` starts from scratch instead).
 
     Its layers and its observation normalizer are `reference.onnx`'s (a shape or a missing
     normalizer refuses to load), its action noise std is WARM_START_STD; the critic starts fresh.

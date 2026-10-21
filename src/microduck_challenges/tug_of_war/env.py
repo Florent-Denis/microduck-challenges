@@ -53,7 +53,8 @@ decisions, each commented where it is made:
       string (its limit SLACK_M), written per env at its reset in a per-world `tendon_range`.
       t6 and t7 learned the walk back only with no load, by iteration 250; switching at a reset
       never yanks a running bout. A played bout (`play`) is taut from its first step: its env
-      counts steps from 0
+      counts steps from 0. A learner that starts as the reference (D19) already walks back: t11,
+      taut from step 0, won sooner than t10, which kept this phase and beat it head to head
   D18 the course's boxes come in tiles at most TILE_M (2 m) along x and y, their tops and
       contacts the Arena's. Where a duck lies flat on a box, mujoco_warp's box-mesh collision can
       put the contact off the duck, along an edge of that box, by several times its length: under
@@ -63,6 +64,11 @@ decisions, each commented where it is made:
       The tiles also give back the Arena's ground: on the 40 m boxes mujoco_warp made about 38 %
       fewer duck-course contacts than the Arena's MuJoCo and a pushed duck slid further; tiled,
       both agree (t1-t9 trained on the untiled boxes)
+  D19 the learner starts as the reference duck (RL_CFG's actor, opponent.ReferenceActor). From
+      scratch it plateaued (t8r +12.6 cm at 1000) or learned to lie flat and hold (t9r -18.3 cm);
+      started as a duck that already backs and pulls, it dragged the reference into the pit in 10
+      bouts of 10 by 500 (t10 +139.6 cm), then decayed to lying prone by 1000 (-17.6 cm): the
+      recipe (challenge.toml) stops at 1000 and the best checkpoint is kept, not the last
 """
 
 import math
@@ -981,7 +987,10 @@ def make_env_cfg(
 
 
 RL_CFG = RslRlOnPolicyRunnerCfg(
+    # The learner starts as the reference duck (D19): ReferenceActor loads its layers and normalizer
+    # and starts its action noise at WARM_START_STD; init_std is MLPModel's, a start from scratch.
     actor=RslRlModelCfg(
+        class_name="microduck_challenges.tug_of_war.opponent:ReferenceActor",
         hidden_dims=(512, 256, 128),
         activation="elu",
         obs_normalization=True,
