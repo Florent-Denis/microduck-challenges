@@ -1,5 +1,6 @@
 """The Tug of War trains in the Arena's tug: the same course, string end, start and command."""
 import hashlib, itertools, math, subprocess, sys, tomllib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 import mujoco, numpy as np, onnx, onnxruntime, pytest, torch
@@ -12,7 +13,7 @@ from rsl_rl.utils import resolve_callable
 from tensordict import TensorDict
 
 import microduck_challenges
-from arena import course as arena_course, runner as arena_runner, tug as arena_tug
+from arena import actuator as arena_actuator, course as arena_course, runner as arena_runner, tug as arena_tug
 from arena.assets import ASSET_ROOT
 from arena.constants import ACTION_SCALE, DEFAULT_POSE, JOINT_NAMES
 from arena.manifest import load_event
@@ -33,7 +34,7 @@ def arena_model():
 
 @pytest.fixture(scope="module")
 def training_model():
-    scene = SceneCfg(num_envs=1, entities={"robot": MICRODUCK_STANDUP_ROBOT_CFG, "opponent": MICRODUCK_STANDUP_ROBOT_CFG},
+    scene = SceneCfg(num_envs=1, entities={"robot": MICRODUCK_STANDUP_ROBOT_CFG, "opponent": tug.OPPONENT_CFG},
                      spec_fn=tug.tug_scene)
     return Scene(scene, device="cpu").compile()
 
@@ -567,6 +568,20 @@ def test_the_opponent_remembers_as_the_arena_does(live):
     obs, now = term.observe(), duck.data.joint_vel[:, term.target_ids]
     assert torch.equal(obs[:, 20:34], before) and not torch.equal(obs[:, 20:34], now)   # a step old
     assert torch.equal(obs[:, 34:48], term.last_action) and term.last_action.any()
+
+
+def test_the_opponents_servos_are_the_arenas(live):
+    """The Arena runs its reference duck on arena.actuator's nominal battery: every opponent world at VIN_NOMINAL
+    with VIN_DROP_GAIN's sag, where the learner's are drawn per world. Nothing else of its servos differs."""
+    (servos,), (learners,) = live.scene["opponent"].actuators, live.scene["robot"].actuators
+    assert torch.equal(servos.vin_tensor, torch.full_like(servos.vin_tensor, arena_actuator.VIN_NOMINAL))
+    assert torch.equal(servos.vin_drop_gain, torch.full_like(servos.vin_drop_gain, arena_actuator.VIN_DROP_GAIN))
+    assert replace(servos.cfg, vin_range=learners.cfg.vin_range,
+                   vin_drop_gain_range=learners.cfg.vin_drop_gain_range) == learners.cfg
+    # Its forcerange follows its battery (the Arena's is VIN_MAX's): the current window caps a servo first.
+    model = live.sim.mj_model
+    limits = [model.actuator_forcerange[a, 1] for a in range(model.nu) if model.actuator(a).name.startswith(tug.OPPONENT)]
+    assert len(limits) == 14 and min(limits) > arena_actuator.KT * arena_actuator.MAX_CURRENT
 
 
 def test_a_reset_clears_the_opponents_memory(live):

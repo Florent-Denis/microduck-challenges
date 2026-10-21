@@ -47,8 +47,10 @@ decisions, each commented where it is made:
       and earned at standstill 0.41 of what walking back pays
   D16 the opponent is the Arena's reference duck, frozen (opponent.py): an action term with no
       agent dimension observes it as the Arena does and drives its own servos at each step's
-      start, on the state the learner's observation saw; no randomisation names it: the Arena
-      runs its reference duck without any
+      start, on the state the learner's observation saw. Nothing is randomised on it, as on the
+      Arena: no DR event or push names it, and its servos (OPPONENT_CFG) run on the Arena's
+      nominal battery, VIN_NOMINAL with VIN_DROP_GAIN's sag, where the learner's draw U(6.5, 8.2)
+      V and U(0, 0.2) per world. Their command delay stays drawn per substep, as the Arena's
   D17 locomotion first: an episode that starts before iteration TAUT_FROM_ITERATION has a slack
       string (its limit SLACK_M), written per env at its reset in a per-world `tendon_range`.
       t6 and t7 learned the walk back only with no load, by iteration 250; switching at a reset
@@ -73,6 +75,7 @@ decisions, each commented where it is made:
 
 import math
 from copy import deepcopy
+from dataclasses import replace
 
 import mujoco
 import torch
@@ -126,6 +129,7 @@ FALL_GRAVITY_Z, FALL_HOLD_S = -0.5, 0.3                    # [termination]: TRAI
 WALL_THICKNESS_M, PLATFORM_OVERRUN_M = 0.05, 20.0           # arena/course.py
 STRING_OFFSET = (0.026, 0.0145, 0.0324215)                 # string_offset("legs")
 PIT_DROP_M = 0.05                                          # arena/tug.py
+VIN_NOMINAL, VIN_DROP_GAIN = 7.35, 0.1                     # arena/actuator.py: the reference duck's battery
 STRING_SITE = "string_end"
 
 STRING = "string"  # the spatial tendon, as arena.course.STRING
@@ -134,6 +138,14 @@ TILE_M = 2.0  # the longest a course tile is along x or y (D18)
 
 ROBOT = "robot/"  # the prefix mjlab attaches the learner entity under
 OPPONENT = "opponent/"  # and the opponent's
+
+# The opponent: the standup robot on the Arena's servos (D16), its battery VIN_NOMINAL with
+# VIN_DROP_GAIN's sag in every world; the learner's are drawn per world.
+OPPONENT_CFG = replace(MICRODUCK_STANDUP_ROBOT_CFG, articulation=replace(
+    MICRODUCK_STANDUP_ROBOT_CFG.articulation,
+    actuators=tuple(replace(servos, vin_range=(VIN_NOMINAL,) * 2, vin_drop_gain_range=(VIN_DROP_GAIN,) * 2)
+                    for servos in MICRODUCK_STANDUP_ROBOT_CFG.articulation.actuators),
+))
 
 # Locomotion first (D17): the string's limit until the walk back, and the iteration it ends at.
 SLACK_M = 100.0
@@ -353,9 +365,10 @@ def make_env_cfg(
 
     # Robot setup: the standup robot, the Arena's collision set (D7): a duck
     # dragged towards the pit touches the ground with its body, not only its feet.
-    # The learner and the opponent (D4); every sensor, term and event below names
-    # `robot` but the opponent's action term (D16) and its two resets (D12).
-    cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG, "opponent": MICRODUCK_STANDUP_ROBOT_CFG}
+    # The learner and the opponent (D4), the opponent on the Arena's battery (D16);
+    # every sensor, term and event below names `robot` but the opponent's action
+    # term (D16) and its two resets (D12).
+    cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG, "opponent": OPPONENT_CFG}
     cfg.scene.sensors = (feet_ground_cfg, self_collision_cfg)
     cfg.viewer.body_name = "trunk_base"
 

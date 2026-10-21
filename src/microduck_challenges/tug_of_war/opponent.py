@@ -108,7 +108,8 @@ class OpponentAction(JointPositionAction):
     """The opponent duck, as the Arena's `runner._Duck`: each control step it observes, its policy
     acts, and its targets are the default pose plus the action (scale 1.0, the Arena's
     ACTION_SCALE), into its own BAM servos (the reset and fifth drives come with the scene's).
-    Nothing randomises it (Decision 7): no noise, delay or encoder bias, as on the Arena."""
+    Nothing randomises it (Decision 7), as on the Arena: no observation noise, delay or encoder
+    bias, and its servos run on the Arena's nominal battery (env.OPPONENT_CFG)."""
 
     policy: Callable[[torch.Tensor], torch.Tensor]
 

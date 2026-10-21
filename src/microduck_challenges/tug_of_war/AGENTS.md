@@ -48,7 +48,8 @@ implicitfast integrator, 10/20 contact solver).
 
 The task trains the learner (always the west duck) against `reference.onnx`, the frozen reference
 duck, in the Arena's bout: both ducks on one string over the pit, 45 s, only the pit decides. The
-opponent runs as the Arena runs it, with no randomisation.
+opponent runs as the Arena runs it, with no randomisation: its servos on the Arena's nominal battery
+(7.35 V, sag gain 0.1), where the learner's are drawn per env.
 
 - **The learner starts as the reference duck** (`ReferenceActor`, `RL_CFG`'s actor: the reference's
   layers and observation normalizer, action noise std 0.3, the critic fresh). Trained from scratch it
@@ -93,8 +94,9 @@ Do not change, or the Arena cannot race the policy or the tests fail:
 - the twist command, fixed at `-0.30` m/s, and the terminations: the pits (`in_pit`,
   `opponent_in_pit`) and `fell`, which ends a *training* episode only (the Arena judges the pit alone;
   without it an untrained duck lies on its side from 1 s and never learns to stand);
-- `opponent.py` and `reference.onnx` (the same bytes the Arena rates against; any other opponent
-  trains a duck the rating does not measure);
+- `opponent.py`, `reference.onnx` and the opponent's servos (`OPPONENT_CFG`, the Arena's battery):
+  the same bytes and servos the Arena rates against; any other opponent trains a duck the rating
+  does not measure;
 - the constants copied from the Arena at the top of `env.py` (course, string, bout length, fall rule): the
   job installs no Arena, and `tests/test_tug_of_war.py` pins each against it. If the Arena's event
   changes, change the Arena first, then here, then the parity tests;
