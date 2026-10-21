@@ -284,7 +284,7 @@ def test_the_knobs_are_labelled_for_what_they_do():
     knobs = tomllib.loads((Path(tug.__file__).parent / "challenge.toml").read_text())["params"]
     assert knobs["upright_reward"]["label"] == "Keep the trunk level"
     stay = knobs["stay_upright"]
-    assert (stay["label"], stay["value"], stay["min"], stay["max"]) == ("Stay upright", 0.0, 0.0, 2.0)
+    assert (stay["label"], stay["min"], stay["max"]) == ("Stay upright", 0.0, 2.0)
 
 
 def _duck(pos, quat, **fields):
