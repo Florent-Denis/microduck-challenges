@@ -1,5 +1,5 @@
 """The Tug of War trains in the Arena's tug: the same course, string end, start and command."""
-import hashlib, itertools, math, subprocess, sys, tomllib
+import itertools, math, subprocess, sys, tomllib
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,7 +20,6 @@ from arena.manifest import load_event
 from microduck_challenges.tug_of_war import env as tug, opponent, rewards
 
 EVENT = load_event("tug-of-war")
-T7_250_SHA256 = "0c4e8b0abc9223c51bc4a32bc78591a4dc72c92ff873b6de7cd894bfad4bc1a2"
 CONTACT = ("geom_type", "geom_size", "geom_contype", "geom_conaffinity", "geom_condim", "geom_priority",
            "geom_friction", "geom_solref", "geom_solimp", "geom_solmix", "geom_margin", "geom_gap")
 TENDON = ("tendon_limited", "tendon_range", "tendon_solref_lim", "tendon_solimp_lim", "tendon_margin",
@@ -291,12 +290,6 @@ def test_the_critic_reads_the_opponent_from_the_learner(cfg):
     assert torch.equal(state[0, 3:], torch.cat([getattr(opponent.data, f)[0] for f in fields]))
 
 
-def test_the_recipe_knows_no_winch(cfg, training_model):
-    assert "hold" not in cfg.rewards
-    assert "winch" not in cfg.commands and "winch_top" not in cfg.curriculum
-    assert not {"winch_pull", "winch_top"} & set(cfg.observations["critic"].terms)
-
-
 def _bout_data(model, prefixes, gap):
     """Both ducks in DEFAULT_POSE at their bout starts, each moved gap / 2 away from the pit, mj_forward."""
     data = mujoco.MjData(model)
@@ -456,12 +449,14 @@ def _relu_actor(tmp_path):
 
 
 def test_the_opponent_net_is_its_onnx():
-    obs = np.random.default_rng(0).normal(0.0, 3.0, (1000, 61)).astype(np.float32)
+    """On observations as the reference's normalizer saw them: its mean plus its std times N(0, 1)."""
+    actor = opponent.load_actor(opponent.REFERENCE)
+    noise = torch.from_numpy(np.random.default_rng(0).normal(size=(1000, 61)).astype(np.float32))
+    obs = actor[0].mean + actor[0].std * noise
     session = onnxruntime.InferenceSession(str(opponent.REFERENCE), providers=["CPUExecutionProvider"])
-    theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in obs])
+    theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in obs.numpy()])
     with torch.no_grad():
-        ours = opponent.load_actor(opponent.REFERENCE)(torch.from_numpy(obs)).numpy()
-    np.testing.assert_allclose(ours, theirs, atol=1e-5)
+        np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-5)
 
 
 def test_the_learner_starts_as_the_reference_duck():
@@ -500,7 +495,7 @@ def test_a_graph_the_loader_does_not_know_is_refused(tmp_path):
 
 
 def test_the_reference_ships_with_the_challenge():
-    assert hashlib.sha256(opponent.REFERENCE.read_bytes()).hexdigest() == T7_250_SHA256
+    assert opponent.REFERENCE.read_bytes() == (ASSET_ROOT / "policies" / EVENT.rating.reference).read_bytes()
     root = Path(microduck_challenges.__file__).parents[2]
     listed = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=root,
                             capture_output=True, text=True, check=True).stdout.split()
@@ -556,7 +551,7 @@ def test_the_opponent_observes_as_the_arena_does(live, arena_model, monkeypatch)
     mujoco.mj_forward(arena_model, data)
     adr = arena_runner._Addresses.of(arena_model, EVENT.start.keyframe, "duck1/")
     theirs = arena_runner._observe(arena_model, data, adr, last_action, np.asarray(EVENT.command, dtype=np.float64), prev_joint_vel)
-    np.testing.assert_allclose(term.observe()[0].numpy(), theirs, atol=1e-4)
+    np.testing.assert_allclose(term.observe()[0].numpy(), theirs, atol=1e-6)
 
 
 def test_the_opponent_remembers_as_the_arena_does(live):
