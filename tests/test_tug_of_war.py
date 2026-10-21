@@ -8,6 +8,8 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.scene import Scene, SceneCfg
 from mjlab_microduck import challenge as ch
 from mjlab_microduck.robot.microduck_constants import MICRODUCK_STANDUP_ROBOT_CFG
+from rsl_rl.utils import resolve_callable
+from tensordict import TensorDict
 
 import microduck_challenges
 from arena import course as arena_course, runner as arena_runner, tug as arena_tug
@@ -459,6 +461,27 @@ def test_the_opponent_net_is_its_onnx():
     with torch.no_grad():
         ours = opponent.load_actor(opponent.REFERENCE)(torch.from_numpy(obs)).numpy()
     np.testing.assert_allclose(ours, theirs, atol=1e-5)
+
+
+def test_the_learner_can_start_as_the_reference_duck():
+    """`--agent.actor.class-name` names it; PPO builds the actor from RL_CFG as below. The rows are
+    observations as the reference's normalizer saw them (its constant command slots constant)."""
+    normalize = opponent.load_actor(opponent.REFERENCE)[0]
+    noise = torch.from_numpy(np.random.default_rng(0).normal(size=(4096, 61)).astype(np.float32))
+    rows = normalize.mean + normalize.std * noise
+    obs = TensorDict({"actor": rows}, batch_size=[len(rows)])
+    cfg = tug.RL_CFG.actor
+    actor = resolve_callable("microduck_challenges.tug_of_war.opponent:ReferenceActor")(
+        obs, {"actor": ["actor"]}, "actor", 14, hidden_dims=cfg.hidden_dims, activation=cfg.activation,
+        obs_normalization=cfg.obs_normalization, distribution_cfg=dict(cfg.distribution_cfg))
+    session = onnxruntime.InferenceSession(str(opponent.REFERENCE), providers=["CPUExecutionProvider"])
+    theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in rows.numpy()])
+    with torch.no_grad():
+        np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-5)
+        assert actor.distribution.std_param.tolist() == pytest.approx([0.3] * 14)
+        # PPO's update at the first rollout step, every env at one state: the reference's statistics hold.
+        actor.update_normalization(TensorDict({"actor": rows[:1].expand(4096, -1)}, batch_size=[4096]))
+        np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-2)
 
 
 def test_a_graph_the_loader_does_not_know_is_refused(tmp_path):

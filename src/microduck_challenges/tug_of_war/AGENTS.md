@@ -57,7 +57,7 @@ costs when the learner does, and `marker_ground` pays the ground the marker wins
 | `challenge.toml` `[recipe]` | `num_envs` 4096, `max_iterations` 3000, `seed` 1 | Yes, when agreed with the user |
 | `env.py` | The whole environment: rewards, terminations, the opponent's wiring, domain randomization, `RL_CFG` (network, PPO, checkpoints every 250 iterations) | Yes, once the knobs are not enough |
 | `rewards.py` | The tug's own terms: the marker's new ground, the pit margin, the Arena's fall rule | Yes |
-| `opponent.py`, `reference.onnx` | The frozen opponent: the reference duck's network and the action term that drives it | No |
+| `opponent.py`, `reference.onnx` | The frozen opponent: the reference duck's network and the action term that drives it; `ReferenceActor`, the learner starting as that duck | No |
 | `check.py` | Plays two policies against each other (B defaults to the reference) | No |
 | `tasks.py`, `event`/`task`/`kind` in `challenge.toml` | Registration with mjlab and the Arena | No |
 
@@ -133,6 +133,10 @@ Agree with the user before the first run:
    # Hugging Face Jobs: the same, plus
    #   --hf-jobs --no-wandb --namespace <user> --ckpt-repo <user>/mjlab-tugofwar-microduck-<name>
    ```
+
+   To start the learner as the reference duck (its actor and normalizer, action noise std 0.3, the
+   critic fresh) instead of from scratch, add
+   `--agent.actor.class-name microduck_challenges.tug_of_war.opponent:ReferenceActor`.
 
    A local run writes `logs/rsl_rl/tug_of_war/<YYYY-MM-DD_HH-MM-SS>_<name>/`: `model_<N>.pt` every
    250 iterations and the last one, TensorBoard events, `provenance.json`. A job uploads the same

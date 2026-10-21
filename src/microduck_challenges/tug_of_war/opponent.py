@@ -6,6 +6,7 @@ the `opponent` entity with it: an action term that takes none of the agent's act
 it at the start of each step, on the state the learner's observation saw, so both ducks act on
 one state, as in the Arena's `runner._step`. It builds the 61 numbers `runner._observe` gives a
 duck and sets the opponent's joint targets as the learner's are set, into its own BAM servos.
+`ReferenceActor` lets the learner start as the same duck (Plan F, lever 5).
 The HF job installs no Arena: nothing here imports it; tests/test_tug_of_war.py pins each copy.
 """
 
@@ -17,8 +18,11 @@ import onnx
 import torch
 from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 from onnx import helper, numpy_helper
+from rsl_rl.models import MLPModel
 
 REFERENCE = Path(__file__).with_name("reference.onnx")  # t7-250, the Arena's reference duck
+REFERENCE_SEEN = 251 * 24 * 4096  # observations t7's normalizer had read at 250: rollouts × steps × envs
+WARM_START_STD = 0.3  # the warm-started learner's action noise: t7-250's own ended between 0.11 and 0.25
 
 # The actor rsl_rl exports (Decision 4), node by node: its op and attributes, ONNX's defaults in.
 _GEMM = ("Gemm", {"alpha": 1.0, "beta": 1.0, "transA": 0, "transB": 1})
@@ -65,6 +69,26 @@ def load_actor(path: Path) -> torch.nn.Sequential:
         linear.load_state_dict({"weight": weight, "bias": bias})
         modules.append(linear)
     return torch.nn.Sequential(*modules)
+
+
+class ReferenceActor(MLPModel):
+    """The learner's actor, starting as the reference duck: `--agent.actor.class-name
+    microduck_challenges.tug_of_war.opponent:ReferenceActor` (RL_CFG's MLPModel starts from scratch).
+
+    Its layers and its observation normalizer are `reference.onnx`'s (a shape or a missing
+    normalizer refuses to load), its action noise std is WARM_START_STD; the critic starts fresh.
+    The ONNX's std carries the normalizer's epsilon. The normalizer counts the observations t7 had
+    read: from 0, PPO's first update would replace its statistics with one batch's.
+    """
+
+    def __init__(self, *args, distribution_cfg: dict, **kwargs):
+        super().__init__(*args, distribution_cfg={**distribution_cfg, "init_std": WARM_START_STD}, **kwargs)
+        normalize, *layers = load_actor(REFERENCE)
+        self.mlp.load_state_dict(torch.nn.Sequential(*layers).state_dict())
+        std = normalize.std - self.obs_normalizer.eps
+        self.obs_normalizer.load_state_dict(
+            {"_mean": normalize.mean, "_var": std**2, "_std": std, "count": torch.tensor(REFERENCE_SEEN)}
+        )
 
 
 @dataclass(kw_only=True)
