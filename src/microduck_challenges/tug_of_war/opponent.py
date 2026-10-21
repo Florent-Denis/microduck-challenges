@@ -93,11 +93,10 @@ class ReferenceActor(MLPModel):
 
 @dataclass(kw_only=True)
 class OpponentActionCfg(JointPositionActionCfg):
-    """The opponent's servos, driven by `policy` on the event's `command` (env.COMMAND)."""
+    """The opponent's servos, driven by the reference duck on the event's `command` (env.COMMAND)."""
 
     entity_name: str = "opponent"
     actuator_names: tuple[str, ...] = (".*",)
-    policy: Path = REFERENCE
     command: tuple[float, ...]
 
     def build(self, env) -> "OpponentAction":
@@ -115,7 +114,7 @@ class OpponentAction(JointPositionAction):
 
     def __init__(self, cfg: OpponentActionCfg, env):
         super().__init__(cfg=cfg, env=env)
-        self.policy = load_actor(cfg.policy).to(self.device).eval()
+        self.policy = load_actor(REFERENCE).to(self.device).eval()
         self._command = torch.tensor(cfg.command, device=self.device).expand(self.num_envs, -1)
         # The parent sized its raw action by action_dim, 0: the opponent's is its policy's, (n, 14).
         self._raw_actions = torch.zeros(self.num_envs, self._num_targets, device=self.device)
