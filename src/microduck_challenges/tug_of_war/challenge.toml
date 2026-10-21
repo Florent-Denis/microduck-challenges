@@ -38,6 +38,6 @@ max   = 4.0
 # many pits.
 [params.stay_upright]
 label = "Stay upright"
-value = 0.0
+value = 1.0
 min   = 0.0
 max   = 2.0
