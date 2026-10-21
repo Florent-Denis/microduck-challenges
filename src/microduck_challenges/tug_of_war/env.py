@@ -1,6 +1,6 @@
 """The Tug of War's training environment: the 2 m Sprint's recipe made the tug's.
 
-The duck trains in the Arena's bout: a lane cut by a pit, two ducks tied neck to neck by a 1 m
+The duck trains in the Arena's bout: a 3 m ring cut by a pit, two ducks tied neck to neck by a 1 m
 string, for a bout's length. The learner (`robot`) is always the west duck; the `opponent` is the
 east one, turned half a way about the pit's vertical axis (Plan F, Decision 1: the east side is
 the same bout turned). The HF job installs no Arena, so the event's numbers and the course's
@@ -13,7 +13,8 @@ here is yours to change; the robot (MICRODUCK_STANDUP_ROBOT_CFG) and the shared 
 (microduck_mdp) come from mjlab_microduck, the tug's own terms from rewards.py. It carries these
 decisions, each commented where it is made:
 
-  D1  no mjlab terrain: `tug_scene` builds the course and every env origin is 0, so each world
+  D1  no mjlab terrain: `tug_scene` builds the course (the ring: its ropes and posts, its
+      backstops, its platforms and the pit across it) and every env origin is 0, so each world
       holds it at the Arena's coordinates (no mjlab terrain has a pit)
   D2  the course body is named `terrain`, as the foot contact sensor expects
   D3  `tug_scene` adds both ducks' string sites and the limited string, so the robot cfg stays
@@ -57,8 +58,10 @@ decisions, each commented where it is made:
       never yanks a running bout. A played bout (`play`) is taut from its first step: its env
       counts steps from 0. A learner that starts as the reference (D19) already walks back: t11,
       taut from step 0, won sooner than t10, which kept this phase and beat it head to head
-  D18 the course's boxes come in tiles at most TILE_M (2 m) along x and y, their tops and
-      contacts the Arena's. Where a duck lies flat on a box, mujoco_warp's box-mesh collision can
+  D18 the course's boxes (platforms, pit floor, backstops) come in tiles at most TILE_M (2 m)
+      along x and y, their tops and contacts the Arena's; its capsules (ropes, posts) come in
+      pieces at most TILE_M long, end to end (D18's rule for every course geom; a cut capsule is
+      the same union). Where a duck lies flat on a box, mujoco_warp's box-mesh collision can
       put the contact off the duck, along an edge of that box, by several times its length: under
       the Arena's 21.85 x 40.9 m platforms it landed 60 to 130 m away and the solver turned the
       whole world NaN (t8, t9: nan_state on both ducks at once, the frozen opponent lying head
@@ -71,6 +74,8 @@ decisions, each commented where it is made:
       started as a duck that already backs and pulls, it dragged the reference into the pit in 10
       bouts of 10 by 500 (t10 +139.6 cm), then decayed to lying prone by 1000 (-17.6 cm): the
       recipe (challenge.toml) stops at 1000 and the best checkpoint is kept, not the last
+  D20 the ring is the Arena's (Plan G Task 2): ropes and posts are rigid capsules, backstops
+      close the gaps between them, the pit crosses the ring from rope to rope
 """
 
 import math
@@ -119,8 +124,9 @@ from .rewards import (
 )
 
 # Copied from the Arena (the HF job cannot import it); tests/test_tug_of_war.py pins each one.
-LENGTH_M, WIDTH_M, WALL_HEIGHT_M = 4.0, 0.8, 0.15          # arena/events/tug-of-war.toml
-PIT_M, PIT_DEPTH_M, STRING_M = 0.30, 0.30, 1.00
+RING_M, PIT_M, PIT_DEPTH_M, STRING_M = 3.0, 0.30, 0.30, 1.00  # arena/events/tug-of-war.toml
+RING_ROPES_M = (0.06, 0.12, 0.18)                          # arena/course.py: the ropes' heights, bottom to top
+RING_ROPE_RADIUS_M, RING_POST_RADIUS_M, RING_POST_TOP_M = 0.006, 0.022, 0.23
 COMMAND_VX = -0.30
 COMMAND = (COMMAND_VX,) + (0.0,) * 12                      # [command], the 13 numbers a duck reads
 BOUT_S, SETTLE_S = 45.0, 0.5
@@ -202,26 +208,44 @@ ENCODER_BIAS_RANGE = (-0.015, 0.015)  # ±0.86° per-joint encoder offset (const
 
 
 def course_boxes() -> list[tuple[str, tuple, tuple]]:
-    """The tug's ground and walls, `(name, pos, half_extents)`: the Arena's
-    `pit_boxes(course) + tug_walls(course)`, same order, same arithmetic. Two platforms with
-    their top face at z = 0 either side of the pit, the pit's floor at z = -PIT_DEPTH_M, and
-    the lane's two walls; no plane, so the pit is a hole."""
+    """The tug's ground and backstops, `(name, pos, half_extents)`: the Arena's
+    `pit_boxes(course) + backstops(course)`, same order, same arithmetic. Two platforms with
+    their top face at z = 0 either side of the pit, the pit's floor at z = -PIT_DEPTH_M, and a
+    wall flush behind each side's ropes, up to the top rope; no plane, so the pit is a hole."""
     half_t = WALL_THICKNESS_M / 2
-    half_y = WIDTH_M / 2 + WALL_THICKNESS_M + PLATFORM_OVERRUN_M
-    x_out = LENGTH_M / 2 + PLATFORM_OVERRUN_M
+    half_y = RING_M / 2 + WALL_THICKNESS_M + PLATFORM_OVERRUN_M
+    x_out = RING_M / 2 + PLATFORM_OVERRUN_M
     half_pit = PIT_M / 2
     slab = PIT_DEPTH_M + WALL_THICKNESS_M
     platform = ((x_out - half_pit) / 2, half_y, slab / 2)
     centre = (x_out + half_pit) / 2
-    half_h = WALL_HEIGHT_M / 2
-    y_off = WIDTH_M / 2 + half_t
+    top = RING_ROPES_M[-1] + RING_ROPE_RADIUS_M
+    reach, along = RING_M / 2 + RING_ROPE_RADIUS_M + half_t, RING_M / 2 + RING_ROPE_RADIUS_M + WALL_THICKNESS_M
     return [
         ("platform_west", (-centre, 0.0, -slab / 2), platform),
         ("platform_east", (centre, 0.0, -slab / 2), platform),
-        ("pit_floor", (0.0, 0.0, -PIT_DEPTH_M - WALL_THICKNESS_M / 2), (half_pit, half_y, WALL_THICKNESS_M / 2)),
+        ("pit_floor", (0.0, 0.0, -PIT_DEPTH_M - half_t), (half_pit, half_y, half_t)),
+        ("backstop_west", (-reach, 0.0, top / 2), (half_t, along, top / 2)),
+        ("backstop_east", (reach, 0.0, top / 2), (half_t, along, top / 2)),
+        ("backstop_north", (0.0, reach, top / 2), (along, half_t, top / 2)),
+        ("backstop_south", (0.0, -reach, top / 2), (along, half_t, top / 2)),
+    ]
+
+
+def course_capsules() -> list[tuple[str, tuple, tuple, float]]:
+    """The ring's ropes then its posts, `(name, from, to, radius)`: the Arena's `ring_ropes(course)`
+    and `ring_posts(course)`, same order, same arithmetic. A side runs post to post at the ring's
+    edge, its ropes bottom to top; a post runs from the canvas to RING_POST_TOP_M."""
+    h = RING_M / 2
+    sides = {"west": ((-h, -h), (-h, h)), "east": ((h, -h), (h, h)),
+             "north": ((-h, h), (h, h)), "south": ((-h, -h), (h, -h))}
+    corners = {"nw": (-h, h), "ne": (h, h), "sw": (-h, -h), "se": (h, -h)}
+    return [
+        (f"rope_{side}_{k}", (*start, z), (*end, z), RING_ROPE_RADIUS_M)
+        for side, (start, end) in sides.items() for k, z in enumerate(RING_ROPES_M)
     ] + [
-        (name, (0.0, y, half_h), (LENGTH_M / 2, half_t, half_h))
-        for name, y in (("wall_left", y_off), ("wall_right", -y_off))
+        (f"post_{corner}", (x, y, 0.0), (x, y, RING_POST_TOP_M), RING_POST_RADIUS_M)
+        for corner, (x, y) in corners.items()
     ]
 
 
@@ -233,6 +257,17 @@ def tiles(boxes: list[tuple[str, tuple, tuple]]) -> list[tuple[str, tuple, tuple
         nx, ny = math.ceil(2 * hx / TILE_M), math.ceil(2 * hy / TILE_M)
         out += [(f"{name}_{i}_{j}", (x - hx + (2 * i + 1) * hx / nx, y - hy + (2 * j + 1) * hy / ny, z),
                  (hx / nx, hy / ny, hz)) for i in range(nx) for j in range(ny)]
+    return out
+
+
+def pieces(capsules: list[tuple[str, tuple, tuple, float]]) -> list[tuple[str, tuple, tuple, float]]:
+    """Each capsule `(name, from, to, radius)` cut into equal pieces at most TILE_M long, end to end,
+    named `name_k` (D18)."""
+    out = []
+    for name, start, end, radius in capsules:
+        n = math.ceil(math.dist(start, end) / TILE_M)
+        point = [tuple(a + (b - a) * k / n for a, b in zip(start, end)) for k in range(n + 1)]
+        out += [(f"{name}_{k}", point[k], point[k + 1], radius) for k in range(n)]
     return out
 
 
@@ -256,12 +291,14 @@ def tug_scene(spec: mujoco.MjSpec) -> None:
     (`arena.course.compile_tug`, Plan F Decisions 1 and 2).
 
     The course is a static body named `terrain`, as mjlab's foot contact sensor expects, its boxes
-    in tiles (D18). Each duck, `robot` and `opponent`, carries a string end, a site at the base of
+    in tiles and its ropes and posts in pieces (D18). Each duck, `robot` and `opponent`, carries a string end, a site at the base of
     its neck, and the tendon `string` ties the two, limited to [0, STRING_M].
     """
     terrain = spec.worldbody.add_body(name="terrain")
     for name, pos, size in tiles(course_boxes()):
         terrain.add_geom(name=name, type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size)
+    for name, start, end, radius in pieces(course_capsules()):
+        terrain.add_geom(name=name, type=mujoco.mjtGeom.mjGEOM_CAPSULE, fromto=[*start, *end], size=[radius, 0, 0])
     for prefix in (ROBOT, OPPONENT):
         spec.body(prefix + "trunk_base").add_site(name=prefix + STRING_SITE, pos=STRING_OFFSET)
     string = spec.add_tendon(name=STRING)

@@ -47,8 +47,10 @@ def test_the_training_never_imports_the_arena():
 
 def test_the_constants_are_the_arenas():
     c, s = EVENT.course, EVENT.start
-    assert (tug.LENGTH_M, tug.WIDTH_M, tug.WALL_HEIGHT_M, tug.PIT_M, tug.PIT_DEPTH_M, tug.STRING_M) == (
-        c.length_m, c.width_m, c.wall_height_m, c.pit_m, c.pit_depth_m, c.string_m)
+    assert (tug.RING_M, tug.PIT_M, tug.PIT_DEPTH_M, tug.STRING_M) == (c.ring_m, c.pit_m, c.pit_depth_m, c.string_m)
+    assert (tug.RING_ROPES_M, tug.RING_ROPE_RADIUS_M, tug.RING_POST_RADIUS_M, tug.RING_POST_TOP_M) == (
+        arena_course.RING_ROPES_M, arena_course.RING_ROPE_RADIUS_M, arena_course.RING_POST_RADIUS_M,
+        arena_course.RING_POST_TOP_M)
     assert tuple(EVENT.command) == tug.COMMAND == (tug.COMMAND_VX,) + (0.0,) * 12
     assert (tug.BOUT_S, tug.SETTLE_S, tug.JOINT_PERTURBATION_RAD, tug.YAW_PERTURBATION_DEG) == (
         EVENT.bout.time_limit_s, s.settle_s, s.joint_rad, s.yaw_deg)
@@ -60,15 +62,26 @@ def test_the_constants_are_the_arenas():
     assert tug.STRING_SITE == arena_course.STRING_SITE
 
 
-def _static_colliders(model):
+def _static_colliders(model, kind):
     return {model.geom(g).name for g in range(model.ngeom)
-            if model.body_weldid[model.geom_bodyid[g]] == 0 and (model.geom_contype[g] or model.geom_conaffinity[g])}
+            if model.body_weldid[model.geom_bodyid[g]] == 0 and (model.geom_contype[g] or model.geom_conaffinity[g])
+            and model.geom_type[g] == kind}
+
+
+def _capsule_ends(model, name):
+    """A static capsule's (from, to), off its position, orientation and half length (MuJoCo's z axis points at `from`)."""
+    g = model.geom(name).id
+    axis = np.zeros(9)
+    mujoco.mju_quat2Mat(axis, model.geom_quat[g])
+    axis = axis.reshape(3, 3)[:, 2] * model.geom_size[g][1]
+    return model.geom_pos[g] + axis, model.geom_pos[g] - axis
 
 
 def test_the_course_tiles_the_arenas(arena_model, training_model):
     """Each of the Arena's boxes comes as tiles at most TILE_M along x and y (D18): together they fill it, each
     with its height, its top and its contacts."""
-    boxes, tiles = _static_colliders(arena_model), _static_colliders(training_model)
+    boxes = _static_colliders(arena_model, mujoco.mjtGeom.mjGEOM_BOX)
+    tiles = _static_colliders(training_model, mujoco.mjtGeom.mjGEOM_BOX)
     assert boxes == {n for n, _, _ in tug.course_boxes()} == {n.rsplit("_", 2)[0] for n in tiles}  # no floor plane left
     datas = [mujoco.MjData(m) for m in (arena_model, training_model)]
     for m, d in zip((arena_model, training_model), datas):
@@ -91,6 +104,27 @@ def test_the_course_tiles_the_arenas(arena_model, training_model):
                 overlap = np.clip(np.minimum(high, other_high) - np.maximum(low, other_low), 0, None)
                 assert overlap[0] * overlap[1] <= 1e-12, name
         assert area == pytest.approx(4 * half[0] * half[1], rel=1e-12), name
+
+
+def test_the_rings_ropes_and_posts_are_the_arenas_in_pieces(arena_model, training_model):
+    """D18 for capsules: every Arena rope or post comes as pieces at most TILE_M long, end to end from its `from`
+    to its `to`, each with its radius and contacts. A capsule cut at a point is the same shape."""
+    capsules = _static_colliders(arena_model, mujoco.mjtGeom.mjGEOM_CAPSULE)
+    pieces = _static_colliders(training_model, mujoco.mjtGeom.mjGEOM_CAPSULE)
+    assert capsules == {n for n, *_ in tug.course_capsules()} == {n.rsplit("_", 1)[0] for n in pieces}
+    assert len(capsules) == 16
+    for name in capsules:
+        ends = _capsule_ends(arena_model, name)                       # (from, to) off geom_pos, geom_quat, size[1]
+        chain = [_capsule_ends(training_model, p) for p in sorted(n for n in pieces if n.rsplit("_", 1)[0] == name)]
+        np.testing.assert_allclose([chain[0][0], chain[-1][1]], ends, atol=1e-12)
+        for (_, a), (b, _) in zip(chain, chain[1:]):
+            np.testing.assert_allclose(a, b, atol=1e-12)
+        for p in (n for n in pieces if n.rsplit("_", 1)[0] == name):
+            t, g = training_model.geom(p).id, arena_model.geom(name).id
+            assert 2 * training_model.geom_size[t][1] <= tug.TILE_M + 1e-12
+            for field in set(CONTACT) - {"geom_size"}:
+                np.testing.assert_allclose(getattr(training_model, field)[t], getattr(arena_model, field)[g], err_msg=f"{p} {field}")
+            assert training_model.geom_size[t][0] == arena_model.geom_size[g][0]
 
 
 @pytest.fixture(scope="module")
