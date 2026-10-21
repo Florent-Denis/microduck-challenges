@@ -22,8 +22,9 @@ from microduck_challenges.tug_of_war import env as tug, opponent, rewards
 EVENT = load_event("tug-of-war")
 CONTACT = ("geom_type", "geom_size", "geom_contype", "geom_conaffinity", "geom_condim", "geom_priority",
            "geom_friction", "geom_solref", "geom_solimp", "geom_solmix", "geom_margin", "geom_gap")
-TENDON = ("tendon_limited", "tendon_range", "tendon_solref_lim", "tendon_solimp_lim", "tendon_margin",
-          "tendon_stiffness", "tendon_damping", "tendon_frictionloss")
+STRING_FIELDS = {"body": ("body_pos", "body_quat", "body_mass", "body_inertia", "body_ipos"),
+                 "jnt": ("jnt_type", "jnt_axis", "jnt_pos"), "geom": CONTACT + ("geom_pos", "geom_quat"),
+                 "site": ("site_pos",)}
 
 
 @pytest.fixture(scope="module")
@@ -211,24 +212,6 @@ def test_either_pit_ends_the_episode_and_pays_its_side(cfg):
     assert paid.tolist() == [-50.0, -50.0, 50.0, 0.0]   # both in on one step: neither
 
 
-def test_the_string_is_slack_until_the_walk_back(cfg, training_model):
-    term = cfg.events["string_limit"]
-    assert term.mode == "reset" and (tug.TAUT_FROM_ITERATION, tug.SLACK_M) == (250, 100.0)
-    assert term.params == {"taut_from_step": tug.TAUT_FROM_ITERATION * tug.RL_CFG.num_steps_per_env}
-    assert "tendon_range" in tug.string_limit.model_fields
-    string, ranges = training_model.tendon(tug.STRING).id, torch.zeros(3, training_model.ntendon, 2)
-    env = SimpleNamespace(common_step_counter=0, sim=SimpleNamespace(mj_model=training_model, model=SimpleNamespace(tendon_range=ranges)))
-    tug.string_limit(env, torch.tensor([0, 1, 2]), **term.params)
-    env.common_step_counter = term.params["taut_from_step"]
-    tug.string_limit(env, torch.tensor([1]), **term.params)
-    assert ranges[:, string, 1].tolist() == [tug.SLACK_M, tug.STRING_M, tug.SLACK_M]   # only a reset turns it taut
-
-
-def test_a_played_bout_is_taut_from_the_start():
-    """`play` shows a trained duck in the Arena's bout: its env counts steps from 0."""
-    assert tug.make_env_cfg(play=True).events["string_limit"].params == {"taut_from_step": 0}
-
-
 def test_the_learners_randomisation_leaves_the_opponent_alone(cfg):
     for name, term in cfg.events.items():
         named = {v.name for v in term.params.values() if isinstance(v, SceneEntityCfg)}
@@ -255,25 +238,37 @@ def _duck(pos, quat, **fields):
     return SimpleNamespace(data=SimpleNamespace(root_link_pos_w=torch.tensor(pos), root_link_quat_w=torch.tensor(quat), **fields))
 
 
-def _marker_run(cfg, path, reset_at=None):
-    """What marker_ground pays each step for learner string ends at `path[k]` (x per env, m), its
-    trunk upright, the opponent's end held at +0.5 m (its trunk turned half a way), so the marker
-    moves at half the learner's end; the env reset just before step `reset_at`."""
+def _straight(west, east):
+    """(frames, STRING_POINTS, 3), west to east: a string straight between its ends' x per frame, y 0, z 0.1."""
+    west, east = np.asarray(west, dtype=float)[:, None], np.asarray(east, dtype=float)[:, None]
+    x = west + (east - west) * np.linspace(0.0, 1.0, arena_tug.STRING_POINTS)
+    return np.stack([x, np.zeros_like(x), np.full_like(x, 0.1)], axis=-1)
+
+
+def _strung(model, string):
+    """An env of len(string) worlds whose string's points, site_xpos, are `string`, where the Arena records them."""
+    site_xpos = torch.zeros(len(string), model.nsite, 3)
+    site_xpos[:, arena_course.string_sites(model)] = torch.tensor(string, dtype=torch.float32)
+    return SimpleNamespace(num_envs=len(string), device="cpu", step_dt=0.02,
+                           sim=SimpleNamespace(mj_model=model, data=SimpleNamespace(site_xpos=site_xpos)))
+
+
+def _marker_run(cfg, model, path, reset_at=None):
+    """What marker_ground pays each step for learner string ends at `path[k]` (x per env, m), the
+    opponent's end held at +0.5 m and the string straight between them, so its middle point, the
+    marker, moves at half the learner's end; the env reset just before step `reset_at`."""
     params, n = cfg.rewards["marker_ground"].params, len(path[0])
-    ox, oy, _ = tug.STRING_OFFSET
-    robot, opponent = _duck([[0.0] * 3] * n, [[1.0, 0.0, 0.0, 0.0]] * n), _duck([[0.5 + ox, oy, 0.11]] * n, [[0.0, 0.0, 0.0, 1.0]] * n)
-    env = SimpleNamespace(num_envs=n, device="cpu", step_dt=0.02, scene={"robot": robot, "opponent": opponent})
-    term = rewards.MarkerGround(cfg.rewards["marker_ground"], env)
+    envs = [_strung(model, _straight(xs, [0.5] * n)) for xs in path]
+    term = rewards.MarkerGround(cfg.rewards["marker_ground"], envs[0])
     paid = []
-    for k, xs in enumerate(path):
+    for k, env in enumerate(envs):
         if k == reset_at:
             term.reset(torch.tensor([0]))
-        robot.data.root_link_pos_w = torch.tensor([[x - ox, 0.0, 0.11] for x in xs])
         paid.append(term(env, **params).tolist())
     return paid
 
 
-def test_marker_ground_pays_new_ground_towards_the_learner(cfg):
+def test_marker_ground_pays_new_ground_towards_the_learner(cfg, training_model):
     """Each step, the ground the marker gains west of the westmost point it reached this episode, at
     the scale's pace (0.05 m/s) tanh(1): a steady pull pays it every step, being dragged east nothing,
     a sway with no net gain only its first new ground. The knob a novice tunes is "Win ground"."""
@@ -281,34 +276,32 @@ def test_marker_ground_pays_new_ground_towards_the_learner(cfg):
     assert (knob["label"], knob["value"], knob["min"], knob["max"]) == ("Win ground", 2.0, 0.5, 5.0)
     term = cfg.rewards["marker_ground"]
     assert term.func is rewards.MarkerGround and term.weight == 2.0
-    assert term.params == {"offset": tug.STRING_OFFSET, "scale": 0.05}
+    assert term.params == {"scale": 0.05}
     step = 2 * 0.05 * 0.02   # the learner's end, so the marker moves 0.05 m/s over a control step
     sway = [-0.5, -0.5 - step, -0.5 + step] * 4
-    paid = _marker_run(cfg, [(-0.5 - k * step, -0.5 + k * step, sway[k]) for k in range(12)])
+    paid = _marker_run(cfg, training_model, [(-0.5 - k * step, -0.5 + k * step, sway[k]) for k in range(12)])
     walk, dragged, swayed = zip(*paid)
     assert walk[0] == 0.0 and walk[1:] == pytest.approx([math.tanh(1.0)] * 11, abs=1e-4)
     assert dragged == (0.0,) * 12
     assert swayed[1] == pytest.approx(math.tanh(1.0), abs=1e-4) and swayed[:1] + swayed[2:] == (0.0,) * 11
 
 
-def test_a_reset_clears_the_marker_record(cfg):
+def test_a_reset_clears_the_marker_record(cfg, training_model):
     """Back at the start after a reset, the ground the last episode won is new again."""
     step = 2 * 0.05 * 0.02
-    paid = _marker_run(cfg, [(-0.5 - k * step,) for k in range(10)] + [(-0.5 - k * step,) for k in range(3)], reset_at=10)
+    path = [(-0.5 - k * step,) for k in range(10)] + [(-0.5 - k * step,) for k in range(3)]
+    paid = _marker_run(cfg, training_model, path, reset_at=10)
     assert [p[0] for p in paid[10:]] == pytest.approx([0.0, math.tanh(1.0), math.tanh(1.0)], abs=1e-4)
 
 
-def test_the_marker_is_where_the_arena_reads_it():
-    rng, frame, scene = np.random.default_rng(2), np.zeros((2, 1, 21)), {}
-    for k, name in enumerate(("robot", "opponent")):
-        pos, quat = rng.uniform(-0.6, 0.6, 3).astype(np.float32), rng.normal(size=4).astype(np.float32)
-        quat /= np.linalg.norm(quat)
-        frame[k, 0, :3], frame[k, 0, 3:7] = pos, quat
-        scene[name] = _duck(pos[None], quat[None])
-    env, offset = SimpleNamespace(scene=scene), arena_course.string_offset("legs")
-    ends = arena_tug.string_ends(frame, offset)[:, 0]
-    assert rewards.marker_x(env, tug.STRING_OFFSET)[:, 0].tolist() == pytest.approx(arena_tug.marker_x(frame, offset).tolist(), abs=1e-6)
-    assert rewards.string_length(env, tug.STRING_OFFSET)[:, 0].tolist() == pytest.approx([np.linalg.norm(ends[0] - ends[1])], abs=1e-6)
+def test_the_marker_is_where_the_arena_reads_it(training_model):
+    """The string's points where the Arena records them: the marker is the middle one's x, the string's
+    length its two ends' distance."""
+    string = np.random.default_rng(2).uniform(-0.6, 0.6, (1, arena_tug.STRING_POINTS, 3))
+    env = _strung(training_model, string)
+    assert rewards.marker_x(env)[:, 0].tolist() == pytest.approx(arena_tug.marker_x(string).tolist(), abs=1e-6)
+    length = np.linalg.norm(string[0, -1] - string[0, 0])
+    assert rewards.string_length(env)[:, 0].tolist() == pytest.approx([length], abs=1e-6)
 
 
 def test_the_critic_reads_the_opponent_from_the_learner(cfg):
@@ -317,28 +310,13 @@ def test_the_critic_reads_the_opponent_from_the_learner(cfg):
     terms = cfg.observations["critic"].terms
     assert terms["opponent"].func is rewards.opponent_state
     for name in ("string_length", "marker_x"):
-        assert (terms[name].func, terms[name].params) == (getattr(rewards, name), {"offset": tug.STRING_OFFSET})
+        assert (terms[name].func, terms[name].params) == (getattr(rewards, name), {})
     fields = ("projected_gravity_b", "root_link_lin_vel_w", "root_link_ang_vel_b")
     robot = _duck([[-0.53, 0.01, 0.11]], [[1.0, 0.0, 0.0, 0.0]])
     opponent = _duck([[0.55, -0.02, 0.12]], [[0.0, 0.0, 0.0, 1.0]], **{f: torch.rand(1, 3) for f in fields})
     state = rewards.opponent_state(SimpleNamespace(scene={"robot": robot, "opponent": opponent}))
     assert state.shape == (1, 12) and state[0, :3].tolist() == pytest.approx([1.08, -0.03, 0.01])
     assert torch.equal(state[0, 3:], torch.cat([getattr(opponent.data, f)[0] for f in fields]))
-
-
-def _bout_data(model, prefixes, gap):
-    """Both ducks in DEFAULT_POSE at their bout starts, each moved gap / 2 away from the pit, mj_forward."""
-    data = mujoco.MjData(model)
-    for prefix, start in zip(prefixes, arena_course.tug_layout(EVENT.course)):
-        x = start.x + math.copysign(1.0, start.x) * gap / 2
-        trunk = model.body(prefix + "trunk_base")
-        free = model.jnt_qposadr[trunk.jntadr[0]]
-        half = math.radians(start.yaw_deg) / 2
-        data.qpos[free:free + 7] = [x, start.y, arena_course.SPAWN_HEIGHT_M, math.cos(half), 0, 0, math.sin(half)]
-        for name, angle in zip(JOINT_NAMES, DEFAULT_POSE):
-            data.qpos[model.joint(prefix + name).qposadr[0]] = angle
-    mujoco.mj_forward(model, data)
-    return data
 
 
 def _ends_apart(west_x, west_y, west_yaw, east_x, east_y, east_yaw):
@@ -349,10 +327,7 @@ def _ends_apart(west_x, west_y, west_yaw, east_x, east_y, east_yaw):
     return math.dist(*ends)
 
 
-def test_the_string_is_tied_like_the_arenas(arena_model, training_model):
-    a, t = arena_model.tendon(tug.STRING).id, training_model.tendon(tug.STRING).id
-    for field in TENDON:
-        np.testing.assert_allclose(getattr(training_model, field)[t], getattr(arena_model, field)[a], err_msg=field)
+def test_the_string_ends_are_the_arenas(arena_model, training_model):
     for ours, theirs in (("robot/", ""), ("opponent/", "duck1/")):
         site, arena_site = training_model.site(ours + tug.STRING_SITE), arena_model.site(theirs + tug.STRING_SITE)
         assert training_model.body(site.bodyid[0]).name == ours + "trunk_base"
@@ -360,12 +335,35 @@ def test_the_string_is_tied_like_the_arenas(arena_model, training_model):
     assert training_model.nu == arena_model.nu == 28   # two ducks' servos, nothing else
 
 
-@pytest.mark.parametrize("gap, held", [(-0.01, False), (0.01, True)])
-def test_the_string_holds_at_its_length(arena_model, training_model, gap, held):
-    for model, prefixes in ((arena_model, ("", "duck1/")), (training_model, ("robot/", "opponent/"))):
-        data = _bout_data(model, prefixes, gap)
-        assert data.ten_length[model.tendon(tug.STRING).id] == pytest.approx(tug.STRING_M + gap, abs=1e-6)
-        assert bool((data.efc_type[:data.nefc] == mujoco.mjtConstraint.mjCNSTR_LIMIT_TENDON).any()) is held
+def _names(model, kind):
+    """The model's names of a `kind` (body, jnt, geom or site), in id order."""
+    return [getattr(model, kind)(i).name for i in range(getattr(model, f"n{kind}"))]
+
+
+def _id(model, kind, name):
+    return getattr(model, kind)(name).id
+
+
+def _string_dofs(model):
+    return [d for d in range(model.nv) if model.body(model.dof_bodyid[d]).name.startswith(tug.STRING)]
+
+
+def test_the_string_is_the_arenas(arena_model, training_model):
+    """Every string body, joint, dof, geom and site, both ties and both excludes, as compile_tug builds them."""
+    for kind, fields in STRING_FIELDS.items():
+        names = [n for n in _names(arena_model, kind) if n.startswith(tug.STRING)]
+        assert names == [n for n in _names(training_model, kind) if n.startswith(tug.STRING)] and names
+        for name in names:
+            a, t = _id(arena_model, kind, name), _id(training_model, kind, name)
+            for field in fields:
+                np.testing.assert_allclose(getattr(training_model, field)[t], getattr(arena_model, field)[a], err_msg=f"{name} {field}")
+    for field in ("dof_damping", "dof_armature"):
+        np.testing.assert_array_equal(getattr(training_model, field)[_string_dofs(training_model)],
+                                      getattr(arena_model, field)[_string_dofs(arena_model)])
+    ties = lambda m, prefixes: [(m.site(m.eq_obj1id[e]).name.replace(prefixes[0], "").replace(prefixes[1], "#"),
+                                 m.site(m.eq_obj2id[e]).name, tuple(m.eq_solref[e]), tuple(m.eq_solimp[e]), int(m.eq_type[e])) for e in range(m.neq)]
+    assert ties(training_model, ("robot/", "opponent/")) == ties(arena_model, ("", "duck1/"))   # "#" marks the east neck
+    assert training_model.nexclude == arena_model.nexclude == 2 and training_model.ntendon == 0
 
 
 def test_the_bout_is_the_same_from_either_side():
@@ -384,14 +382,17 @@ def test_no_start_stretches_the_string(cfg):
     assert west["x"][0] == pytest.approx(tug.west_start()[0]) and east["x"][1] == pytest.approx(tug.east_start()[0])
 
 
-def test_the_string_end_is_where_the_arena_judges_it():
+def test_the_string_end_is_where_the_arena_ties_it(arena_model):
+    """pit_margin's string end, off the learner's trunk, is the west duck's string_end site in the Arena's model."""
     pos, quat = torch.tensor([[-0.53, -0.01, 0.11]]), torch.tensor([[0.97, 0.05, -0.2, 0.1]])
     quat = quat / quat.norm()
     env = SimpleNamespace(scene={"robot": SimpleNamespace(data=SimpleNamespace(root_link_pos_w=pos, root_link_quat_w=quat))})
     margin = rewards.pit_margin(env, tug.STRING_OFFSET, -tug.PIT_M / 2)
-    frame = np.zeros((1, 1, 21))
-    frame[0, 0, :3], frame[0, 0, 3:7] = pos[0].numpy(), quat[0].numpy()
-    end = arena_tug.string_ends(frame, arena_course.string_offset("legs"))[0, 0]
+    data = mujoco.MjData(arena_model)
+    free = arena_model.jnt_qposadr[arena_model.body("trunk_base").jntadr[0]]
+    data.qpos[free:free + 7] = torch.cat([pos[0], quat[0]]).numpy()
+    mujoco.mj_kinematics(arena_model, data)
+    end = data.site_xpos[arena_model.site(tug.STRING_SITE).id]
     assert margin.item() == pytest.approx(-tug.PIT_M / 2 - end[0], abs=1e-6)
 
 
@@ -418,14 +419,28 @@ def test_the_opponent_starts_where_the_arenas_east_duck_does(live):
     assert ((yaw - 180.0).abs() <= EVENT.start.yaw_deg + 1e-3).all()
 
 
-def test_the_string_turns_taut_episode_by_episode(live):
-    string = live.sim.mj_model.tendon(tug.STRING).id
-    live.common_step_counter = 0
+def test_a_reset_lays_the_string_between_the_ducks(live):
     live.reset()
-    assert live.sim.model.tendon_range[:, string, 1].tolist() == [tug.SLACK_M] * 2
-    live.common_step_counter = tug.TAUT_FROM_ITERATION * tug.RL_CFG.num_steps_per_env
-    live.reset(env_ids=torch.tensor([0]))
-    assert live.sim.model.tendon_range[:, string, 1].tolist() == [tug.STRING_M, tug.SLACK_M]
+    data, model = live.sim.data, live.sim.mj_model
+    site = lambda name: data.site_xpos[:, model.site(name).id]
+    points = torch.stack([site(f"{tug.STRING}p{k}") for k in range(17)], dim=1)          # (2, 17, 3)
+    west, east = site("robot/string_end"), site("opponent/string_end")
+    gap = (east - west).norm(dim=-1)                                                         # 0.96–1.00 m: the starts' jitter
+    assert (points[:, 8] - (west + east) / 2).norm(dim=-1).max() <= 1e-5                     # centred between the ties
+    over = (1.0 - gap) / 2 + 1e-5                                                            # a straight 1 m string overshoots closer ties
+    assert ((points[:, 0] - west).norm(dim=-1) <= over).all() and ((points[:, 16] - east).norm(dim=-1) <= over).all()
+    line = points[:, 16] - points[:, 0]
+    off = torch.linalg.cross(points - points[:, :1], line[:, None].expand_as(points)).norm(dim=-1) / line.norm(dim=-1)[:, None]
+    assert off.max() <= 1e-5                                                                # straight
+    assert not data.qvel[:, _string_dofs(model)].any()
+
+
+def test_the_marker_is_the_strings_middle_point(live):
+    live.reset()
+    live.step(torch.zeros(2, 14))
+    p8 = live.sim.data.site_xpos[:, live.sim.mj_model.site(f"{tug.STRING}p{rewards.MIDDLE}").id]
+    assert rewards.MIDDLE == arena_tug.MIDDLE and torch.equal(rewards.marker_x(live)[:, 0], p8[:, 0])
+    assert (tug.make_env_cfg().sim.nconmax, tug.make_env_cfg().sim.njmax) == (200, 1500)
 
 
 def test_a_pit_on_either_side_ends_the_episode(live):
@@ -620,38 +635,30 @@ def test_a_reset_clears_the_opponents_memory(live):
     assert not term.last_action[1].any() and not term.prev_joint_vel[1].any() and term.last_action[0].any()
 
 
-def _standing(west_end, east_end):
-    """A bout's trace, (2, frames, 21): trunks upright, west facing east and east turned 180°, each
-    string end on the given x per frame (y 0, z 0.1)."""
-    trace = np.zeros((2, len(west_end), 21))
-    trace[0, :, 3], trace[1, :, 6] = 1.0, 1.0
-    ends = arena_tug.string_ends(trace, arena_course.string_offset("legs"))
-    trace[:, :, 0:3] = np.stack([west_end, east_end])[..., None] * [1, 0, 0] + [0, 0, 0.1] - ends
-    return trace
-
-
 def _bout(seed, loser, how, time_s, west_end=-0.5, east_end=0.4):
+    """A bout whose string's ends stand still at these x, the settle's last frame too, the string straight
+    between them. Nothing reads the trunks: their traces are zeros."""
     frames = round(time_s * 50)
-    one = np.full(frames, 1.0)
-    return arena_tug.BoutOutcome(seed, loser, how, time_s, _standing(west_end * one, east_end * one),
-                                 _standing(np.full(1, west_end), np.full(1, east_end)))
+    string = _straight(np.full(frames, west_end), np.full(frames, east_end))
+    return arena_tug.BoutOutcome(seed, loser, how, time_s, np.zeros((2, frames, 21)), np.zeros((2, 1, 21)),
+                                 string, _straight([west_end], [east_end]))
 
 
 def _pulled_by_a_step_back():
     """2250 frames: the west end from -0.50 (the settle's last frame) back by 8 cm over 1.00 s, then still;
-    the east end still at +0.42."""
+    the east end still at +0.42: the ends 0.92 m apart, 1.00 m from 1 s on, the string straight between them."""
     west = -0.50 - 0.08 * np.minimum(np.arange(1, 2251) / 50, 1.0)
-    return arena_tug.BoutOutcome(1, None, "draw", 45.0, _standing(west, np.full(2250, 0.42)),
-                                 _standing(np.full(1, -0.50), np.full(1, 0.42)))
+    return arena_tug.BoutOutcome(1, None, "draw", 45.0, np.zeros((2, 2250, 21)), np.zeros((2, 1, 21)),
+                                 _straight(west, np.full(2250, 0.42)), _straight([-0.50], [0.42]))
 
 
 def test_a_bout_line_says_how_the_pull_went():
     from microduck_challenges.tug_of_war import check
     outcome = _pulled_by_a_step_back()
-    assert check.pull(outcome, "west") == "taut at 0.94 s · A backed 8.0 cm by 2 s · marker 8.0 cm to A"
-    assert check.pull(outcome, "east") == "taut at 0.94 s · A backed 0.0 cm by 2 s · marker -8.0 cm to A"
-    held = arena_tug.BoutOutcome(1, None, "draw", 45.0, _standing(np.full(2250, -0.49), np.full(2250, 0.49)),
-                                 _standing(np.full(1, -0.49), np.full(1, 0.49)))
+    assert check.TAUT_M == 0.98   # the ends 0.98 m apart from the 38th frame
+    assert check.pull(outcome, "west") == "taut at 0.76 s · A backed 8.0 cm by 2 s · marker 8.0 cm to A"
+    assert check.pull(outcome, "east") == "taut at 0.76 s · A backed 0.0 cm by 2 s · marker -8.0 cm to A"
+    held = _bout(1, None, "draw", 45.0, -0.485, 0.485)   # 0.97 m apart
     assert check.pull(held, "west") == "never taut · A backed 0.0 cm by 2 s · marker 0.0 cm to A"
 
 

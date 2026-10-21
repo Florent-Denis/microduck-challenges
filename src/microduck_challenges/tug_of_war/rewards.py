@@ -1,15 +1,20 @@
-"""The Tug of War's own terms: where the string ends and the marker are, the new ground the marker
-wins towards the learner, the opponent as the critic reads it, which end of a bout an episode met,
-and the Arena's fall rule as a training-only termination.
+"""The Tug of War's own terms: where the learner's string end and the marker are, the new ground the
+marker wins towards the learner, the opponent as the critic reads it, which end of a bout an episode
+met, and the Arena's fall rule as a training-only termination.
 
-A string end is where the Arena ties the string, the base of the neck: the trunk's position plus
-the offset turned by the trunk's quaternion, as `arena.tug.string_ends` reads a trace. The marker
-is the middle of the two ends, as `arena.tug.marker_x` reads it: the Arena rates a bout by it.
+The string is the Arena's rope (env.add_string): its points are the sites p0 (the west end, tied to
+the learner) to p16 (the east end, tied to the opponent), where `arena.tug` records them. The marker
+is the middle point, p{MIDDLE}, as `arena.tug.marker_x` reads it: the Arena rates a bout by it. A
+string end, as pit_margin reads it, is where the Arena ties the string, the base of the neck: the
+trunk's position plus the offset turned by the trunk's quaternion.
 """
 
 import torch
 from mjlab.managers import ManagerTermBase
 from mjlab.utils.lab_api.math import quat_apply
+
+STRING = "string/"  # the string's names, as arena.course.STRING
+MIDDLE = 8  # the point the marker is, as arena.tug.MIDDLE
 
 
 def _string_end(data, offset: tuple) -> torch.Tensor:
@@ -18,9 +23,9 @@ def _string_end(data, offset: tuple) -> torch.Tensor:
     return pos + quat_apply(quat, pos.new_tensor(offset).expand_as(pos))
 
 
-def _ends(env, offset: tuple) -> tuple[torch.Tensor, torch.Tensor]:
-    """The learner's and the opponent's string ends, (n, 3) each."""
-    return _string_end(env.scene["robot"].data, offset), _string_end(env.scene["opponent"].data, offset)
+def _point(env, k: int) -> torch.Tensor:
+    """(n, 3): the string's point p{k} in the world."""
+    return env.sim.data.site_xpos[:, env.sim.mj_model.site(f"{STRING}p{k}").id]
 
 
 def pit_margin(env, offset: tuple, pit_edge_x: float) -> torch.Tensor:
@@ -33,16 +38,14 @@ def pit_margin_reward(env, offset: tuple, pit_edge_x: float, scale: float) -> to
     return torch.tanh(pit_margin(env, offset, pit_edge_x).squeeze(-1).clamp(min=0.0) / scale)
 
 
-def marker_x(env, offset: tuple) -> torch.Tensor:
-    """(n, 1): the marker's x, the middle of the two string ends, in m; negative on the learner's side."""
-    learner, opponent = _ends(env, offset)
-    return ((learner[:, 0] + opponent[:, 0]) / 2).unsqueeze(-1)
+def marker_x(env) -> torch.Tensor:
+    """(n, 1): the marker's x, the string's middle point, in m; negative on the learner's side."""
+    return _point(env, MIDDLE)[:, :1]
 
 
-def string_length(env, offset: tuple) -> torch.Tensor:
-    """(n, 1): the string ends' distance, in m; the string holds them at most STRING_M apart."""
-    learner, opponent = _ends(env, offset)
-    return (opponent - learner).norm(dim=-1, keepdim=True)
+def string_length(env) -> torch.Tensor:
+    """(n, 1): the distance between the string's two ends, in m: short of its 1 m, it sags."""
+    return (_point(env, 2 * MIDDLE) - _point(env, 0)).norm(dim=-1, keepdim=True)
 
 
 def opponent_state(env) -> torch.Tensor:
@@ -62,12 +65,12 @@ class MarkerGround(ManagerTermBase):
     refreshes the kinematics, so the reset pose cannot be read in `reset`."""
 
     def __init__(self, cfg, env):
-        del cfg  # the scale and offset come with each call
+        del cfg  # the scale comes with each call
         super().__init__(env)
         self._best = torch.full((env.num_envs,), float("nan"), device=env.device)
 
-    def __call__(self, env, offset: tuple, scale: float) -> torch.Tensor:
-        x = marker_x(env, offset).squeeze(-1)
+    def __call__(self, env, scale: float) -> torch.Tensor:
+        x = marker_x(env).squeeze(-1)
         best = torch.where(self._best.isnan(), x, self._best)
         self._best = torch.minimum(best, x)
         return torch.tanh((best - x).clamp(min=0.0) / (scale * env.step_dt))

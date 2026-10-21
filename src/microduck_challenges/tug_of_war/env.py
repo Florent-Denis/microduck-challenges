@@ -17,10 +17,16 @@ decisions, each commented where it is made:
       backstops, its platforms and the pit across it) and every env origin is 0, so each world
       holds it at the Arena's coordinates (no mjlab terrain has a pit)
   D2  the course body is named `terrain`, as the foot contact sensor expects
-  D3  `tug_scene` adds both ducks' string sites and the limited string, so the robot cfg stays
-      untouched
-  D4  two entities, `robot` and `opponent`, both the standup robot: `compile_tug`'s bout. The
-      string is a tendon limited to [0, STRING_M]: slack up to its length, never stretched
+  D3  `tug_scene` adds both ducks' string ends (a site at the base of each neck) and the string
+      tied to them (`add_string`), so the robot cfg stays untouched
+  D4  two entities, `robot` and `opponent`, both the standup robot, tied by the string:
+      `compile_tug`'s bout. The string is a rope, the Arena's (arena.course._add_string): sixteen
+      capsules, 80 g and 8 mm thick, two hinges a joint, tied neck to neck; it sags, pulls only
+      when taut and can be stepped or lain on. Its numbers are the Arena's, measured by the rope
+      study (2026-10-21), and never lowered: each step down from them was unstable there. Its
+      armature, on every string dof, keeps mujoco_warp finite: without it every world turned NaN
+      within 0.4 to 0.7 s, the rope's twist inertia (3e-8 kg m²) beside the ducks' terms being
+      beyond float32's precision once the rope touches a duck (study §5)
   D5  the Arena's numbers are copied below, pinned by the parity tests
   D6  the twist is the event's fixed command, -0.30 m/s backwards, in every env
   D7  the Arena's collision set (the standup robot: a dragged duck touches with its body) and
@@ -52,12 +58,9 @@ decisions, each commented where it is made:
       Arena: no DR event or push names it, and its servos (OPPONENT_CFG) run on the Arena's
       nominal battery, VIN_NOMINAL with VIN_DROP_GAIN's sag, where the learner's draw U(6.5, 8.2)
       V and U(0, 0.2) per world. Their command delay stays drawn per substep, as the Arena's
-  D17 locomotion first: an episode that starts before iteration TAUT_FROM_ITERATION has a slack
-      string (its limit SLACK_M), written per env at its reset in a per-world `tendon_range`.
-      t6 and t7 learned the walk back only with no load, by iteration 250; switching at a reset
-      never yanks a running bout. A played bout (`play`) is taut from its first step: its env
-      counts steps from 0. A learner that starts as the reference (D19) already walks back: t11,
-      taut from step 0, won sooner than t10, which kept this phase and beat it head to head
+  D17 removed, locomotion first (a slack string for the first 250 iterations): a rope has no
+      limit to lift, and every training starts as the reference (D19), which already walks back:
+      t11, taut from step 0, won sooner than t10, which kept the slack phase
   D18 the course's boxes (platforms, pit floor, backstops) come in tiles at most TILE_M (2 m)
       along x and y, their tops and contacts the Arena's; its capsules (ropes, posts) come in
       pieces at most TILE_M long, end to end (D18's rule for every course geom; a cut capsule is
@@ -76,6 +79,11 @@ decisions, each commented where it is made:
       recipe (challenge.toml) stops at 1000 and the best checkpoint is kept, not the last
   D20 the ring is the Arena's (Plan G Task 2): ropes and posts are rigid capsules, backstops
       close the gaps between them, the pit crosses the ring from rope to rope
+  D21 every reset lays the string straight between the ducks' actual string ends, centred on
+      them (`reset_string`): mujoco_warp's reset_data puts it back between the nominal starts, up
+      to 2 cm off the jittered ducks (D12). A straight 1.00 m string overshoots ends closer than
+      1 m by (1 - gap) / 2 at each end, at most 2 cm, and the ties take it in on the first steps
+      (Plan H Task 4's probe watches them for NaN)
 """
 
 import math
@@ -83,6 +91,7 @@ from copy import deepcopy
 from dataclasses import replace
 
 import mujoco
+import numpy as np
 import torch
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
@@ -94,7 +103,6 @@ from mjlab.managers import (
     RewardTermCfg,
     TerminationTermCfg,
 )
-from mjlab.managers.event_manager import requires_model_fields
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl import (
     RslRlOnPolicyRunnerCfg,
@@ -104,6 +112,7 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from mjlab.utils.lab_api.math import quat_apply, quat_from_euler_xyz
 from mjlab.utils.noise import UniformNoiseCfg as Unoise
 
 from mjlab_microduck import challenge
@@ -113,6 +122,8 @@ from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
 from .opponent import OpponentActionCfg
 from .rewards import (
+    MIDDLE,
+    STRING,
     ArenaFall,
     MarkerGround,
     ended_by,
@@ -137,8 +148,18 @@ STRING_OFFSET = (0.026, 0.0145, 0.0324215)                 # string_offset("legs
 PIT_DROP_M = 0.05                                          # arena/tug.py
 VIN_NOMINAL, VIN_DROP_GAIN = 7.35, 0.1                     # arena/actuator.py: the reference duck's battery
 STRING_SITE = "string_end"
+SPAWN_HEIGHT_M = 0.12                                      # arena/course.py: the string is built at it
 
-STRING = "string"  # the spatial tendon, as arena.course.STRING
+# The string (D4), arena/course.py's: the rope study's numbers, never lowered.
+STRING_SEGMENTS = 16                                       # capsules of 6.25 cm
+STRING_RADIUS_M = 0.004
+STRING_MASS_KG = 0.080
+STRING_END_MASS_KG = 0.015                                 # each end piece: a tie is as stiff as its tip is heavy
+STRING_DAMPING = 0.003                                     # N m s/rad a hinge
+STRING_ARMATURE = 1e-6                                     # on every string dof, the free root's too (D4)
+STRING_TIE_SOLREF = (0.01, 1.0)                            # two timesteps, the stiffest MuJoCo allows
+STRING_TIE_SOLIMP = (0.9, 0.95, 0.001, 0.5, 2.0)           # MuJoCo's default, as the study measured it
+STRING_FRICTION = (1.0, 0.005, 0.0001)
 
 TILE_M = 2.0  # the longest a course tile is along x or y (D18)
 
@@ -152,10 +173,6 @@ OPPONENT_CFG = replace(MICRODUCK_STANDUP_ROBOT_CFG, articulation=replace(
     actuators=tuple(replace(servos, vin_range=(VIN_NOMINAL,) * 2, vin_drop_gain_range=(VIN_DROP_GAIN,) * 2)
                     for servos in MICRODUCK_STANDUP_ROBOT_CFG.articulation.actuators),
 ))
-
-# Locomotion first (D17): the string's limit until the walk back, and the iteration it ends at.
-SLACK_M = 100.0
-TAUT_FROM_ITERATION = 250
 
 # The sprint's recipe switches and ranges (sprint_2m/env.py), the ones it uses.
 NUM_STEPS_PER_ENV = 24
@@ -291,8 +308,9 @@ def tug_scene(spec: mujoco.MjSpec) -> None:
     (`arena.course.compile_tug`, Plan F Decisions 1 and 2).
 
     The course is a static body named `terrain`, as mjlab's foot contact sensor expects, its boxes
-    in tiles and its ropes and posts in pieces (D18). Each duck, `robot` and `opponent`, carries a string end, a site at the base of
-    its neck, and the tendon `string` ties the two, limited to [0, STRING_M].
+    in tiles and its ropes and posts in pieces (D18). Each duck, `robot` and `opponent`, carries a
+    string end, a site at the base of its neck, and the string (`add_string`) is built straight
+    between the two as they stand at their nominal starts.
     """
     terrain = spec.worldbody.add_body(name="terrain")
     for name, pos, size in tiles(course_boxes()):
@@ -301,24 +319,96 @@ def tug_scene(spec: mujoco.MjSpec) -> None:
         terrain.add_geom(name=name, type=mujoco.mjtGeom.mjGEOM_CAPSULE, fromto=[*start, *end], size=[radius, 0, 0])
     for prefix in (ROBOT, OPPONENT):
         spec.body(prefix + "trunk_base").add_site(name=prefix + STRING_SITE, pos=STRING_OFFSET)
-    string = spec.add_tendon(name=STRING)
-    string.wrap_site(ROBOT + STRING_SITE)
-    string.limited = True
-    string.range = [0.0, STRING_M]
-    string.wrap_site(OPPONENT + STRING_SITE)
+    (west_x, west_y), (east_x, east_y) = west_start(), east_start()
+    ox, oy, oz = STRING_OFFSET  # the east duck is turned half a way: its offset points west
+    add_string(spec, (west_x + ox, west_y + oy, SPAWN_HEIGHT_M + oz), (east_x - ox, east_y - oy, SPAWN_HEIGHT_M + oz))
 
 
-@requires_model_fields("tendon_range")
-def string_limit(env: ManagerBasedRlEnv, env_ids: torch.Tensor, taut_from_step: int) -> None:
-    """A reset event (D17): the string's limit for the episodes `env_ids` start, SLACK_M before
-    `taut_from_step` control steps of training (`common_step_counter`), STRING_M from then on.
+def add_string(spec: mujoco.MjSpec, a, b) -> None:
+    """The Arena's string (arena.course._add_string), straight from world point `a` to `b` due east
+    of it: STRING_SEGMENTS capsules in one tree, rooted by a free joint at the middle segment, two
+    chains out to the ends. Each joint is two hinges, y then z: no twist, which a round chain cannot
+    show. Segment k carries the site p{k} at its west end, the last one p{N} at its east end too.
+    The first point is tied to the learner's string end, the last to the opponent's, each by a
+    `connect`, and each end piece is left out of the collisions with the trunk it is tied to. The
+    string never collides with itself (contype 0) and touches everything else, its own contact
+    numbers winning (priority 1; MuJoCo's default solref and solimp)."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    n, mid = STRING_SEGMENTS, MIDDLE
+    seg = float(np.linalg.norm(b - a)) / n
+    inner = (STRING_MASS_KG - 2 * STRING_END_MASS_KG) / (n - 2)
 
-    The decorator has mjlab expand `tendon_range` per world, so each env keeps the limit its
-    episode started with until its next reset.
-    """
-    string = env.sim.mj_model.tendon(STRING).id
-    taut = env.common_step_counter >= taut_from_step
-    env.sim.model.tendon_range[env_ids, string, 1] = STRING_M if taut else SLACK_M
+    def segment(parent: mujoco.MjsBody, k: int, pos, west: float) -> mujoco.MjsBody:
+        """Segment k at `pos` in `parent`, its capsule running east from `west` on its x."""
+        body = parent.add_body(name=f"{STRING}seg{k}", pos=list(pos))
+        if k == mid:
+            body.add_freejoint(name=f"{STRING}root").armature = STRING_ARMATURE
+        else:
+            for axis, direction in (("y", [0, 1, 0]), ("z", [0, 0, 1])):
+                body.add_joint(
+                    name=f"{STRING}j{k}{axis}",
+                    type=mujoco.mjtJoint.mjJNT_HINGE,
+                    axis=direction,
+                    damping=STRING_DAMPING,
+                    armature=STRING_ARMATURE,
+                )
+        body.add_geom(
+            name=f"{STRING}cap{k}",
+            type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+            fromto=[west, 0, 0, west + seg, 0, 0],
+            size=[STRING_RADIUS_M, 0, 0],
+            mass=STRING_END_MASS_KG if k in (0, n - 1) else inner,
+            contype=0,
+            conaffinity=1,
+            priority=1,
+            friction=list(STRING_FRICTION),
+        )
+        body.add_site(name=f"{STRING}p{k}", pos=[west, 0, 0])
+        if k == n - 1:
+            body.add_site(name=f"{STRING}p{n}", pos=[west + seg, 0, 0])
+        return body
+
+    root = segment(spec.worldbody, mid, (a + b) / 2, 0.0)
+    parent = root
+    for k in range(mid + 1, n):  # the east half: each segment hangs from its west end
+        parent = segment(parent, k, (seg, 0, 0), 0.0)
+    parent = root
+    for k in range(mid - 1, -1, -1):  # the west half: each segment hangs from its east end
+        parent = segment(parent, k, (0 if k == mid - 1 else -seg, 0, 0), -seg)
+
+    for prefix, tip in ((ROBOT, 0), (OPPONENT, n)):  # the learner to the first point, the opponent to the last
+        spec.add_equality(
+            type=mujoco.mjtEq.mjEQ_CONNECT,
+            objtype=mujoco.mjtObj.mjOBJ_SITE,
+            name1=prefix + STRING_SITE,
+            name2=f"{STRING}p{tip}",
+            solref=list(STRING_TIE_SOLREF),
+            solimp=list(STRING_TIE_SOLIMP),
+        )
+    for prefix, piece in ((ROBOT, 0), (OPPONENT, n - 1)):
+        spec.add_exclude(bodyname1=prefix + "trunk_base", bodyname2=f"{STRING}seg{piece}")
+
+
+def reset_string(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
+    """A reset event, after both ducks' (D21): the string straight between their string ends as
+    their resets placed them, its root, the middle point, centred between them, every hinge at 0,
+    every string velocity 0. Each end is the duck's free-joint position plus STRING_OFFSET turned
+    by its quaternion, read off qpos: the sites' kinematics are stale until the reset's forward.
+    The root's quaternion turns its +x onto the west end to the east end, a yaw then a pitch."""
+    data = env.sim.data
+    ends = []
+    for name in ("robot", "opponent"):
+        pose = data.qpos[env_ids][:, env.scene[name].indexing.free_joint_q_adr]
+        ends.append(pose[:, :3] + quat_apply(pose[:, 3:], pose.new_tensor(STRING_OFFSET).expand_as(pose[:, :3])))
+    west, east = ends
+    direction = (east - west) / (east - west).norm(dim=-1, keepdim=True)
+    yaw, pitch = torch.atan2(direction[:, 1], direction[:, 0]), -torch.asin(direction[:, 2])
+    root = env.sim.mj_model.joint(f"{STRING}root")
+    q, v, hinges = int(root.qposadr[0]), int(root.dofadr[0]), 2 * (STRING_SEGMENTS - 1)
+    data.qpos[env_ids, q:q + 3] = (west + east) / 2
+    data.qpos[env_ids, q + 3:q + 7] = quat_from_euler_xyz(torch.zeros_like(yaw), pitch, yaw)
+    data.qpos[env_ids, q + 7:q + 7 + hinges] = 0.0  # the string's joints follow its root's: one subtree
+    data.qvel[env_ids, v:v + 6 + hinges] = 0.0
 
 
 def heading_error(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -417,11 +507,13 @@ def make_env_cfg(
     cfg.scene.spec_fn = tug_scene
 
     # The Arena's solver (D7, arena/course.py): implicitfast, 10/20 iterations,
-    # 0.005 s physics steps, 4 per 0.02 s control step. nconmax is a contact
-    # buffer, not physics, and every world's CCD scratch is sized from it: an
-    # Arena bout peaks at 19 contacts (two ducks, one dragged into the pit), so
-    # 200 is ten times that; 400 asked 4.4 GB more of the L4 at 4096 envs (t8, t9).
+    # 0.005 s physics steps, 4 per 0.02 s control step. nconmax and njmax are
+    # buffers, not physics. Every world's CCD scratch is sized from nconmax: the
+    # string peaks at 31 to 40 contacts a world (42 in the Arena), and 400 asked
+    # 4.4 GB more of the L4 at 4096 envs (t8, t9). The string peaks at 196
+    # constraint rows a world.
     cfg.sim.nconmax = 200
+    cfg.sim.njmax = 1500
     cfg.sim.mujoco.integrator = "implicitfast"
     cfg.sim.mujoco.timestep = 0.005
     cfg.sim.mujoco.iterations = 10
@@ -513,7 +605,7 @@ def make_env_cfg(
     # Pull straight. The Arena commands yaw 0 and never tells the policy its
     # heading, and nothing above prices a slow drift: at this std a 0.07 rad/s
     # turn keeps 99% of track_angular_velocity. A duck that turns away from the
-    # string's line pulls across it and walks into the lane's walls.
+    # string's line pulls across it and walks into the ring's ropes.
     # heading_hold prices the yaw ANGLE against the spawn heading (the roller's
     # term and std): the policy cannot see its heading, but it can learn to
     # null its gait's mean yaw rate. The critic sees the heading error
@@ -532,7 +624,7 @@ def make_env_cfg(
     cfg.rewards["marker_ground"] = RewardTermCfg(
         func=MarkerGround,
         weight=knobs["pull_reward"],
-        params={"offset": STRING_OFFSET, "scale": 0.05},
+        params={"scale": 0.05},
     )
     # The ground kept between the string end and the pit's west edge; the scale
     # is the margin the duck starts with (0.35 m), so giving ground costs from
@@ -620,7 +712,7 @@ def make_env_cfg(
     # STRING_M apart and centred on the pit. The offsets only ever bring them closer
     # (west x up to +2 cm, east x down to -2 cm), the ±1 cm and the Arena's yaw
     # perturbation instead of the template's ±0.5 m and ±π, which would start ducks
-    # over the pit or facing away from the lane. The joints get the Arena's
+    # over the pit or facing away from each other. The joints get the Arena's
     # perturbation.
     west_x, west_y = west_start()
     east_x, east_y = east_start()
@@ -658,13 +750,8 @@ def make_env_cfg(
             "asset_cfg": SceneEntityCfg("opponent", joint_names=(".*",)),
         },
     )
-    # Locomotion first (D17): the string is slack for the episodes that start
-    # before TAUT_FROM_ITERATION, STRING_M long after, set at each env's reset.
-    cfg.events["string_limit"] = EventTermCfg(
-        func=string_limit,
-        mode="reset",
-        params={"taut_from_step": 0 if play else TAUT_FROM_ITERATION * NUM_STEPS_PER_ENV},
-    )
+    # The string, straight between both ducks as their resets above placed them (D21).
+    cfg.events["reset_string"] = EventTermCfg(func=reset_string, mode="reset")
 
     # Velocity-based pushes for robustness training
     if ENABLE_VELOCITY_PUSHES:
@@ -790,7 +877,7 @@ def make_env_cfg(
     )
     cfg.observations["critic"].terms["opponent"] = ObservationTermCfg(func=opponent_state)
     for name, func in (("string_length", string_length), ("marker_x", marker_x)):
-        cfg.observations["critic"].terms[name] = ObservationTermCfg(func=func, params={"offset": STRING_OFFSET})
+        cfg.observations["critic"].terms[name] = ObservationTermCfg(func=func)
 
     # Projected gravity, the slot the Arena feeds the policy.
     cfg.observations["actor"].terms["projected_gravity"] = deepcopy(

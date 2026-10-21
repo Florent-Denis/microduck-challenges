@@ -16,15 +16,13 @@ import numpy as np
 from arena.manifest import load_event
 from arena.policy import PolicyError, load_policy
 from arena.constants import CTRL_DT
-from arena.course import string_offset
-from arena.tug import BoutOutcome, marker_x, run_bout, string_ends
+from arena.tug import BoutOutcome, marker_x, run_bout
 
 from .opponent import REFERENCE
 
 EVENT = "tug-of-war"
 SIDES = ("west", "east")
-OFFSET = string_offset("legs")
-TAUT_M = 0.995  # the string's ends this far apart: it is taut
+TAUT_M = 0.98  # the string's ends this far apart: it is taut (a 1 m rope sags short of its length)
 BACKED_S = 2.0  # where A's retreat is read
 
 
@@ -39,16 +37,18 @@ def play(manifest, a, b, bouts: int) -> list[tuple[str, BoutOutcome]]:
 
 
 def pull(outcome: BoutOutcome, side: str) -> str:
-    """How A pulled: when the string first went taut, how far A's string end moved away from the pit
-    from the settle's last frame to BACKED_S, and where the marker ended, in cm towards A."""
+    """How A pulled: when the string's ends first stood TAUT_M apart, how far A's end of the string
+    (its first point west, its last east) moved away from the pit from the settle's last frame to
+    BACKED_S, and where the marker ended, in cm towards A."""
     towards_a = 1.0 if side == "west" else -1.0
-    ends = string_ends(outcome.trace, OFFSET)
-    taut = np.flatnonzero(np.linalg.norm(ends[0] - ends[1], axis=1) >= TAUT_M)
+    end = 0 if side == "west" else -1
+    string = outcome.string
+    taut = np.flatnonzero(np.linalg.norm(string[:, -1] - string[:, 0], axis=1) >= TAUT_M)
     taut_at = f"taut at {(taut[0] + 1) * CTRL_DT:.2f} s" if taut.size else "never taut"
-    start = string_ends(outcome.settle[:, -1:], OFFSET)[SIDES.index(side), 0, 0]
-    at = min(round(BACKED_S / CTRL_DT), len(outcome.trace[0])) - 1
-    backed = -towards_a * (ends[SIDES.index(side), at, 0] - start) * 100
-    marker = -towards_a * marker_x(outcome.trace[:, -1:], OFFSET)[0] * 100
+    start = outcome.string_settle[-1, end, 0]
+    at = min(round(BACKED_S / CTRL_DT), len(string)) - 1
+    backed = -towards_a * (string[at, end, 0] - start) * 100
+    marker = -towards_a * marker_x(string[-1:])[0] * 100
     return f"{taut_at} · A backed {round(backed, 1) + 0.0:.1f} cm by {BACKED_S:.0f} s · marker {round(marker, 1) + 0.0:.1f} cm to A"
 
 
