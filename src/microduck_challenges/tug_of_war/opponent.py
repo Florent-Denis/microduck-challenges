@@ -1,6 +1,6 @@
 """The Tug of War's opponent: the Arena's reference duck, frozen (Plan F, Decisions 3–7).
 
-`reference.onnx` is t7-250, the bytes the Arena vendors as its reference duck. `load_actor` reads
+`reference.onnx` is t15-250, the bytes the Arena vendors as its reference duck. `load_actor` reads
 it into torch, so it runs on the training's device with the envs' batch. `OpponentAction` drives
 the `opponent` entity with it: an action term that takes none of the agent's action. mjlab calls
 it at the start of each step, on the state the learner's observation saw, so both ducks act on
@@ -20,9 +20,9 @@ from mjlab.envs.mdp.actions import JointPositionAction, JointPositionActionCfg
 from onnx import helper, numpy_helper
 from rsl_rl.models import MLPModel
 
-REFERENCE = Path(__file__).with_name("reference.onnx")  # t7-250, the Arena's reference duck
-REFERENCE_SEEN = 251 * 24 * 4096  # observations t7's normalizer had read at 250: rollouts × steps × envs
-WARM_START_STD = 0.3  # the warm-started learner's action noise: t7-250's own ended between 0.11 and 0.25
+REFERENCE = Path(__file__).with_name("reference.onnx")  # the Arena's reference duck, t15-250, trained upright (Plan H)
+REFERENCE_SEEN = 502 * 24 * 4096  # t15-250's normalizer count: rollouts (t7-250's 251, then its own 251) × steps × envs
+WARM_START_STD = 0.3  # the warm-started learner's action noise: t15-250's own ended between 0.21 and 0.40, mean 0.30
 
 # The actor rsl_rl exports (Decision 4), node by node: its op and attributes, ONNX's defaults in.
 _GEMM = ("Gemm", {"alpha": 1.0, "beta": 1.0, "transA": 0, "transB": 1})
@@ -77,8 +77,8 @@ class ReferenceActor(MLPModel):
 
     Its layers and its observation normalizer are `reference.onnx`'s (a shape or a missing
     normalizer refuses to load), its action noise std is WARM_START_STD; the critic starts fresh.
-    The ONNX's std carries the normalizer's epsilon. The normalizer counts the observations t7 had
-    read: from 0, PPO's first update would replace its statistics with one batch's.
+    The ONNX's std carries the normalizer's epsilon. The normalizer counts the observations t15-250
+    had read: from 0, PPO's first update would replace its statistics with one batch's.
     """
 
     def __init__(self, *args, distribution_cfg: dict, **kwargs):
