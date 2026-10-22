@@ -367,7 +367,7 @@ def test_the_recipe_users_get_lets_the_duck_go_down():
     shipped = tug.make_env_cfg()   # the committed toml, not the fixture's
     assert (knob["label"], knob["value"]) == ("Stay upright", 0.0)
     assert {k: params[k]["value"] for k in ("pull_reward", "back_reward", "upright_reward")} == {
-        "pull_reward": 2.0, "back_reward": 3.0, "upright_reward": 1.0}   # t19 verified this recipe against t15-250 on the ring (+131.5 cm at 250, Mac)
+        "pull_reward": 2.0, "back_reward": 3.0, "upright_reward": 1.0}   # t24 verified this recipe against t20-500 (+138.1 cm at 250, Mac)
     assert "down" not in shipped.terminations and "fell" in shipped.terminations
 
 
@@ -657,8 +657,8 @@ def _relu_actor(tmp_path):
 
 
 def test_the_opponent_net_is_its_onnx():
-    onnx_path = opponent.REFERENCE
     """On observations as the net's normalizer saw them: its mean plus its std times N(0, 1)."""
+    onnx_path = opponent.REFERENCE
     actor = opponent.load_actor(onnx_path)
     noise = torch.from_numpy(np.random.default_rng(0).normal(size=(1000, 61)).astype(np.float32))
     obs = actor[0].mean + actor[0].std * noise

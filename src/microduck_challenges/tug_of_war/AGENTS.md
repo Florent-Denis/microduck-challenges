@@ -32,12 +32,13 @@ backwards. The rules, from `arena/events/tug-of-war.toml` in the installed Arena
   falls, sits or lies down stays in play and can still be dragged in. If neither is in the pit by
   the time limit (**45 s**), or both go in on one step, the marker decides: the string's middle
   point, pulled towards one side, that side's duck wins.
-- **The rating**: five bouts against the Arena's **reference duck** (`reference.onnx` here, t15-250,
-  trained on its feet on this ring and string), the entry west on odd seeds. A bout scores the
-  centimetres of ground the marker ends from the centre line towards the entry, plus **100 cm** when
-  only the opponent is in the pit (minus 100 when only the entry is). The rating is the mean of the
-  five, **in centimetres, higher wins**. `arena score` prints it. The ducks trained before it rate
-  -132 to -139 cm against it ("What is known"): a first entry that rates negative is normal.
+- **The rating**: five bouts against the Arena's **reference duck** (`reference.onnx` here, t20-500,
+  which walks backwards upright, as the robot walks, on this ring and string), the entry west on odd
+  seeds. A bout scores the centimetres of ground the marker ends from the centre line towards the
+  entry, plus **100 cm** when only the opponent is in the pit (minus 100 when only the entry is). The
+  rating is the mean of the five, **in centimetres, higher wins**. `arena score` prints it. Against
+  it, the ducks that pull bowed onto their heads rate about +135 cm, the recipe as shipped +138.1 cm
+  after 250 iterations, and the reference itself +3.7 cm ("What is known").
 - **The weekly cup**: every entry plays it, bout against bout; the rating ranks the board.
 
 ## The policy
@@ -58,21 +59,50 @@ runs as the Arena runs it, with no randomisation: its servos on the Arena's nomi
 sag gain 0.1), where the learner's are drawn per env.
 
 - **The learner starts as the reference duck** (`ReferenceActor`, `RL_CFG`'s actor: the
-  reference's layers and observation normalizer, action noise std 0.3, the critic fresh). Trained
-  from scratch it plateaued or lay flat (t8r, t9r); started as the reference it dragged it into the
-  pit by 500 (t10, t12). To train from scratch anyway, add `--agent.actor.class-name MLPModel`.
+  reference's layers and observation normalizer, action noise std `WARM_START_STD` 0.5, the
+  reference's own, the critic fresh). Trained from scratch it plateaued or lay flat (t8r, t9r);
+  started as the reference of the day it dragged it into the pit by 500 (t10 and t12, from t7-250)
+  and by 250 (t22, t23 and t24, from t20-500). To train from scratch anyway, add
+  `--agent.actor.class-name MLPModel`.
 - **The string is the Arena's from the first iteration**: there is no slack phase. Every reset lays
   it straight between the two ducks' string ends.
-- **1000 iterations, a checkpoint every 250**: the warm-started duck peaks early (at 250 or 500 in
-  every run so far), then decays. Keep the best checkpoint, not the last: judge every one.
-- **Stay upright** (`stay_upright`, off by default). At 0 a duck may crouch, sit, lie or crawl, as
-  the Arena allows, and the Arena's fall rule (`fell`: tilted past 60° for 0.3 s) ends a training
-  episode only. Above 0, `down` replaces `fell`: the learner is down when its trunk is under 7 cm
-  (`UPRIGHT_Z_M`) or tilted past 45° (`UPRIGHT_TILT_DEG`), and down for 0.3 s straight ends the
-  training episode and costs that many pits (-50 each). Standing, the trunk is at 12 cm; a puller
-  at 7 cm or more, apart from dips shorter than 0.3 s (t15-250's trunk median 8.3 cm, t17-250's 7.2 cm). Turn it on for a duck that must stay on its feet:
-  the owner's ducks trained with it at 1.0, and Win ground at 4.0 (at 2.0 they stood and never
-  pulled).
+- **1000 iterations, a checkpoint every 250**: every run so far peaked early, then decayed (t22 and
+  t23 at 250, their gait sliding after; t20 at 500). Keep the best checkpoint, not the last: judge
+  every one.
+- **Stay upright** (`stay_upright`, off by default) means walking upright, as the robot walks. At 0
+  a duck may crouch, sit, lie, crawl or plant its head, as the Arena allows, and the Arena's fall
+  rule (`fell`: tilted past 60° for 0.3 s) ends a training episode only. Above 0, `down` replaces
+  `fell`. The learner must hold:
+  - its trunk 10 cm up or more (`UPRIGHT_Z_M`);
+  - its trunk pitched 10° towards the opponent to 20° away from it (`UPRIGHT_PITCH_DEG`), rolled
+    10° at most (`UPRIGHT_ROLL_DEG`);
+  - its head's centre of mass 18 cm up or more (`UPRIGHT_HEAD_Z_M`);
+  - its neck and head pitch within 30° of standing (`UPRIGHT_NECK_DEG`);
+  - only its feet on the course: a contact sensor (`body_ground_contact`) watches every other body.
+
+  Out of that for 0.3 s straight ends the training episode and costs that many pits (-50 each).
+  The bands are the robot's own walk with margin: the Arena's golden walker (BEST_alpha_walking)
+  holds its trunk at 11.0–12.4 cm, pitched -2.7 to +2.1°, its head at 22.6–24.1 cm. The 20° back is
+  room to lean on the string.
+- **Why the owner's ducks use it**: the owner asked that his ducks walk backwards upright, like the
+  robot's own gait (2026-10-22). Under the earlier rule (trunk 7 cm or more, tilt 45° or less) they
+  pulled bowed onto their heads, the head a third leg ("What is known"). They train with stay
+  upright 1.0 and Win ground 4.0: set those two knobs and train as below (t22 and t23 trained
+  that recipe, at commit `c2333dd`). Other players are free: the Arena judges the pit alone.
+- **The reference was trained from the walker**: t20 started as the golden walker, a duck that
+  walks backwards upright but never pulled, and trained against it (stay upright 1.0, Win ground
+  4.0); its checkpoint 500 is the reference duck. Its recipe is commit `8391bf7` of this
+  repository's `tug-of-war` branch and the command
+
+  ```bash
+  uv run train Mjlab-TugOfWar-MicroDuck --env.scene.num-envs 4096 --agent.max-iterations 1000 \
+      --agent.seed 1 --agent.logger tensorboard --agent.run-name t20 \
+      --agent.actor.class-name microduck_challenges.tug_of_war.opponent:WalkerActor \
+      --env.actions.opponent.onnx walker.onnx
+  ```
+
+  The walker (`walker.onnx`, `WalkerActor` and the opponent's `onnx` field) is only at that commit:
+  later commits start from the reference and play it.
 - `win` pays (+50) when the opponent drops into the pit, `out` costs (-50) when the learner does (and
   when `fell` ends the episode), `marker_ground` pays the new ground the marker wins towards the
   learner, `pit_margin_reward` the ground kept between the learner's string end and the pit.
@@ -84,9 +114,9 @@ sag gain 0.1), where the learner's are drawn per env.
 | `challenge.toml` `[params]` | The four knobs below | Yes, first. Keep each value within its `min`/`max` (the workshop refuses others) |
 | `challenge.toml` `[recipe]` | `num_envs` 4096, `max_iterations` 1000, `seed` 1 | Yes, when agreed with the user |
 | `env.py` | The whole environment: the ring and the string (copies of the Arena's), rewards, terminations, the opponent's wiring, domain randomization, `RL_CFG` (the actor, starting as the reference duck; PPO; checkpoints every 250 iterations) | Yes, once the knobs are not enough; not the copied constants (below) |
-| `rewards.py` | The tug's own terms: the marker's new ground, the pit margin, the Arena's fall rule (`ArenaFall`) and the upright rule (`Down`, with stay upright on) | Yes |
+| `rewards.py` | The tug's own terms: the marker's new ground, the pit margin, the Arena's fall rule (`ArenaFall`), and walking upright: the rule's constants (`UPRIGHT_Z_M` 0.10 m, `UPRIGHT_PITCH_DEG` -10 to +20, `UPRIGHT_ROLL_DEG` 10, `UPRIGHT_HEAD_Z_M` 0.18 m, `UPRIGHT_NECK_DEG` 30; the bodies and joints they read, `HEAD`, `NECK`, `FEET`), `is_upright` and `Down` (with stay upright on) | Yes; `check.py` judges with the same `is_upright`, so a constant changes training and judging together |
 | `opponent.py`, `reference.onnx` | The frozen opponent: the reference duck's network and the action term that drives it; `ReferenceActor`, the learner's actor, starting as that duck | No |
-| `check.py` | Plays two policies against each other (B defaults to the reference), says how each bout was pulled and how A stood | No |
+| `check.py` | Plays two policies against each other (B defaults to the reference), says how each bout was pulled and how A walked | No |
 | `tasks.py`, `event`/`task`/`kind` in `challenge.toml` | Registration with mjlab and the Arena | No |
 
 | Knob | Label | Default | Range | The owner's ducks | Sets in `env.py` |
@@ -94,7 +124,7 @@ sag gain 0.1), where the learner's are drawn per env.
 | `pull_reward` | Win ground | 2.0 | 0.5–5.0 | 4.0 | `marker_ground` weight |
 | `back_reward` | Walk backwards | 3.0 | 0.0–4.0 | 3.0 | `track_linear_velocity` weight |
 | `upright_reward` | Keep the trunk level | 1.0 | 0.0–4.0 | 1.0 | `upright` weight |
-| `stay_upright` | Stay upright | 0.0 | 0.0–2.0 | 1.0 | the cost of going down, in pits (`down` weight -50 × value); above 0, `down` replaces `fell` |
+| `stay_upright` | Stay upright | 0.0 | 0.0–2.0 | 1.0 | above 0, `down` (walking upright) replaces `fell`, at that many pits (`down` weight -50 × value), and adds the `body_ground_contact` sensor |
 
 Do not change, or the Arena cannot race the policy or the tests fail:
 
@@ -196,14 +226,19 @@ Agree with the user before the first run:
   " logs/rsl_rl/tug_of_war/<run> Train/mean_episode_length Episode_Termination/in_pit Episode_Termination/opponent_in_pit Episode_Termination/fell Episode_Reward/marker_ground Episode_Reward/win
   ```
 
-  Healthy, as measured with stay upright on and Win ground 4.0 (t15, t17): `down` falls from 2 to
-  10 at iteration 50 to about 0.2 by 250; `marker_ground`, `win` and
-  `opponent_in_pit` rise and the opponent's pit cuts episodes short (t15 at 250: `marker_ground`
-  0.27, `win` 0.015, `opponent_in_pit` 2.0, episodes 1734 control steps); the learner's `in_pit`
-  stays at 0. Then it decays: t15's `marker_ground` fell to 0.18 and `win` to 0.005 by 750, its
-  episodes back near 2200 control steps, the reference dragged in later each time and no longer at
-  999; t17's `marker_ground` fell from 0.11 at 250 to 0.06 at 500. That decay is the known shape,
-  not a broken run: judge the checkpoints at 250, 500, 750 and 1000 and keep the best, not the last.
+  Healthy, as measured against the walking-upright reference:
+  - the owner's recipe (stay upright 1.0, Win ground 4.0; t23 at 250): `down` 1.5 an episode at
+    iteration 50 and 0.8 at 250, `marker_ground` 0.19 at 50 and 0.24 from 100 on, `win` 0.02,
+    `opponent_in_pit` 8.3, the learner's `in_pit` 0, episodes 432 control steps (the reference in
+    the pit within about 2.5 s);
+  - the recipe as shipped (t24): the learner's `in_pit` 5.7 at 100 falling to 0.7 by 250, while
+    `opponent_in_pit` rose to 6.7 and episodes to 256 control steps.
+
+  Then it decays, and the gait goes first: `upright` and `head_pose_tracking` rise while `air_time`
+  and `opponent_in_pit` fall, the feet planted and sliding (t23 from 250 to 500: `upright` 0.18 to
+  0.33, `opponent_in_pit` 8.3 to 5.3; t21 from 500 to 999, most of it after about 650: `upright`
+  0.17 to 0.72, `head_pose_tracking` 0.33 to 1.43, `air_time` 0.008 to 0.002). That decay is the known shape, not a broken run: judge the checkpoints at 250,
+  500, 750 and 1000 and keep the best, not the last.
   Warning signs: `marker_ground` flat near 0.035 with the learner's `in_pit` near 1 (t16 never
   found the pull and was dragged in); `marker_ground` flat near 0.01 while `upright` rises (t13,
   t14 stood and never pulled); `fell`, `down` or the learner's `in_pit` climbing; `nan_state` in more
@@ -238,36 +273,51 @@ reference duck):
 uv run --frozen --group workshop python -m microduck_challenges.tug_of_war.check A.onnx [B.onnx] --bouts 10
 ```
 
-It prints a line per bout, then the tally:
+It prints a line per bout, then the tally. The owner's candidate, t23-250, against the reference:
 
 ```
-bout 1 · seed 1 · A west · B loses by pit at 14.20 s · never taut · A backed 7.2 cm by 2 s · marker 34.8 cm to A · on its feet 55 % · longest down 0.20 s
+bout 1 · seed 1 · A west · B loses by pit at 2.56 s · taut at 0.08 s · A backed 22.9 cm by 2 s · marker 40.9 cm to A · upright 100 % · longest out 0.00 s · feet only 100 % · 5.5 steps/s · slide 9 %
+...
+A 10 · B 0 · draws 0 · A in the pit 0 · B in the pit 10 · by marker 0 · median decision 2.4 s
 ```
 
-- **taut**: when the string's ends first stood 0.98 m apart (`TAUT_M`). Information only: "never
-  taut" is normal: the string goes taut when the other duck stands and resists, and stays short of
-  it when that duck lies down or gives way, even dragged into the pit.
+- **taut**: when the string's ends first stood 0.98 m apart (`TAUT_M`). Information only: against
+  the reference, which stands and resists, it goes taut within 0.4 s; "never taut" is normal
+  against a duck that lies down, gives way or bows, even dragged into the pit.
 - **A backed**: how far A's end of the string moved away from the pit in the first 2 s, signed.
 - **marker**: where the string's middle ended, in cm towards A.
-- **on its feet**, **longest down**: the share of A's frames upright by stay upright's rule (trunk
-  at 7 cm or more, tilt 45° or less), and its longest straight run down; the frames with A's trunk
-  within 8 cm of the pit's lip (`LIP_M`) are left out. Stay upright ends an episode on the run, not
-  the share: a duck that dips under 7 cm every second but never for 0.3 s is on its feet.
+- **upright**: the share of A's frames walking upright by stay upright's rule (`is_upright` and
+  only its feet on the course), the rule training ends an episode on.
+- **longest out**: A's longest straight run out of that rule; training ends an episode at 0.30 s.
+- **feet only**: the share of A's frames with no body but its feet on the course.
+- **steps/s**: both feet's clear steps a second: a foot back on the course after at least 2 frames
+  (0.04 s) in the air, during which it lifted 5 mm or more.
+- **slide**: the share of the feet's horizontal travel made while they touch the course. The
+  walker slides 8–9 %, t17-250, bowed onto its head, 57–60 %.
+- **standing still**, in place of both: the feet travelled less than 1 cm a second.
 
-The gates the owner's ducks were judged by (10 `check.py` bouts against the reference, the rating
-from `arena score`):
+The frames with A's trunk within 8 cm of the pit's lip (`LIP_M`) are left out of the last five.
 
-- **U** (only for a duck meant to stay on its feet): in at least 9 of the 10 bouts `longest down`
-  is under 0.30 s; for the checkpoint you pick, also over the round robin against the other top
-  checkpoints: a cup is duck against duck (t18-250 and t18-500 passed U against the reference but
-  sat 30 to 43 s against other ducks).
+The gates the owner's ducks were judged by (10 `check.py` bouts, the rating from `arena score`, the
+curves):
+
+- **U2** (walking upright, only for a duck meant to walk upright): in at least 9 of the 10 bouts
+  `upright` is 90 % or more and `longest out` under 0.30 s. The owner's ducks passed it twice:
+  against the reference, and against a duck that pulls bowed onto its head (t15-250, the reference
+  before t20-500). In a cup your duck meets other players' ducks, and must stay upright even when
+  it loses.
+- **S** (stepping): in at least 8 of the 10 bouts `standing still`, or `steps/s` 2.0 or more with
+  `slide` 20 % or less. A pass that rests on `standing still` in more than 2 of the 10 bouts is not
+  walking backwards: t21-250 passed with 8 bouts standing still, anchored, and was ruled out.
 - **R1**: `nan_state` under 0.01 in the curves, and in at least 8 of the 10 bouts A backed +2.0 cm
   or more by 2 s.
 - **R2**: a rating of +20.0 cm or more against the reference.
 - **R3** (a target): the reference in the pit in at least 3 of the 10 bouts.
 
 Pick the highest rating among the checkpoints that pass. Between ratings within 5 cm, a round robin
-decides: `check.py A B --bouts 10` for each pair, more bouts won, then more pits.
+decides: `check.py A B --bouts 20` with each as A, more bouts won, then more pits; U2 and S must
+hold over those bouts too, for a cup is duck against duck (t22-250 passed both against the
+reference but stepped 1.0–2.1 times a second against t23-250).
 
 Scores on this machine are indicative: only the Space rates an entry, and simulations on different
 CPU architectures drift apart after a few seconds. GPU training varies a lot from run to run: before
@@ -297,15 +347,80 @@ fork, never `pollen-robotics`; the workshop's home sets that up).
 
 All numbers are from the Mac, indicative: the Space (x86) rates differently.
 
-### On the ring and the string (2026-10-22)
+### Walking upright (2026-10-22)
+
+- **The bow**: a probe of the contacts and forces, two bouts each, found that t15-250, t17-250 and
+  t19-250, the ducks that pulled on their feet by the earlier rule (or, t19, with stay upright
+  off), bowed onto their heads:
+  - trunk 7–8 cm, pitched 33–44° towards the opponent, neck 50–85° down;
+  - the head on the floor in 77–83 % of frames, carrying 39–43 % of the floor load and about half
+    the backward friction (-0.9 to -1.3 N on the head, -0.9 to -1.1 N on both feet, against the
+    ~2 N the tie pulls);
+  - the feet sliding through 58–73 % of their travel;
+  - with no string they bowed the same: it is how they move, not a reaction to the string.
+- **The walker** (BEST_alpha_walking, the robot's own gait), in every bout `check.py` read: upright
+  100 %, longest out 0.00 s, feet only 100 %, 3.5–3.8 steps/s, slide 8–9 %. On the open stage it
+  stands still at the tug's -0.30 m/s and walks backwards at -0.40 (21 cm/s). It never pulled:
+  t15-250 dragged it into the pit in 5.2–5.9 s, and t20-500 in 7.6 and 26.8 s, upright throughout.
+- **The shin**: posed at random within every band, a shin touched the floor in 2.2 % of 200,000
+  poses, the trunk at 10.0–11.1 cm with a foot down. The bands alone let a duck kneel, so stay
+  upright also watches every body but the feet (`body_ground_contact`). A trunk sunk to 3 cm fires
+  it on the trunk, both hips and both shins; a duck standing, then toppling, never fired it in 60
+  steps. It cost nothing measurable on the L4 (t20 7.3 s an iteration, t15 9.8 s without it). The
+  walker as both ducks under the rule (64 worlds, 300 steps): upright 99 % of world-steps, no NaN,
+  15 contacts and 94 constraint rows a world at most.
+- **The reference search, t20 and t21** (commit `8391bf7`, seeds 1 and 2, stay upright 1.0, Win
+  ground 4.0, started as the walker and against it; judged at 250, 500, 750 and 999; no lever was
+  needed):
+  - every checkpoint stayed upright against the walker and against t15-250 but one: t21-750
+    (79–80 % upright in two bouts against t15-250, 0.40 s out);
+  - t20-250 planted both feet after about 3 s and slid back (0.1–0.5 steps/s, slide 25–44 %);
+    t21-250 passed S, but all 8 of its passes stood still: anchored, ruled out; t21-500 and
+    t21-999 planted and slid (S 1 and 0 of 10);
+  - t20-500 stepped back upright (3.7–6.6 steps/s, slide 11–14 %) and dragged the walker into the
+    pit 10 of 10 (6.7–11.1 s, median 8.8 s; backed +10.3 to +15.3 cm by 2 s);
+  - t20-750 and t20-999 still stepped but no longer pulled: the walker beat each 10-0 (in the pit,
+    then on the marker at 45 s);
+  - all eight rated -124.4 to -136.2 cm against t15-250: the head-planter dragged every
+    walking-upright duck into the pit in about 7 s;
+  - the pick, t20-500: the only checkpoint passing U2 both ways, S by walking and R1 that also beat
+    the walker by pit; t20-750 and t20-999, within 5 cm of its rating, lost to it 10-0. It became
+    the reference duck.
+- **The planters against t20-500**: t15-250 +135.6, t17-250 +135.1, t19-250 +134.9 cm (15 pit wins
+  of 15, at 5.1–9.2 s); t10-500 +8.3 (four marker losses, one pit win); t20-500 against itself
+  +3.7 (five marker wins of 0.4–8.6 cm at 45 s).
+- **The candidate search, t22 and t23** (commit `c2333dd`, seeds 1 and 2, stay upright 1.0, Win
+  ground 4.0, started as t20-500 and against it):
+  - at 250: t22 +142.6, t23 +143.3 cm, the reference in the pit 10 of 10 at about 2.5 s, taut
+    within 0.4 s, upright 100 %, 4.2–6.9 steps/s, slide 7–10 %; against t15-250 both stayed
+    upright (97–100 %) and were dragged in 9 of 10;
+  - every later checkpoint still rated +117.0 to +141.7 cm but slid and failed S: t22-500 (4 of
+    10), t22-750 (0, slide 36–73 %), t23-500 (7), t23-750 (4), t23-999 (2); t23-250 beat t23-500
+    10-0 both ways;
+  - the round robin t22-250 against t23-250, 20 bouts each as A: t23-250 won 36 (36 pits) and lost
+    4, stepping 2.1–4.3 times a second; t22-250 stepped 1.0–2.1 times and failed S;
+  - the pick, the owner's candidate: t23-250.
+- **The recipe as shipped, verified** (t24, commit `10cc7aa`, stay upright 0, Win ground 2.0,
+  started as t20-500 and against it, seed 1): +138.1 cm at 250, the reference in the pit 10 of 10
+  (median 3.0 s), backed +15.6 to +30.9 cm by 2 s. Started upright, it stayed upright (100 % in 10
+  of 10) and stepped (3.0–5.3 steps/s, slide 8–12 %) with no rule asking it to.
+- **Every run peaks early**: t20 at 500, t22 and t23 at 250, then the gait slides. Judge every
+  250 iterations and keep the best.
+
+### On the ring and the string, the earlier upright rule (2026-10-22)
+
+Stay upright then read only the trunk: 7 cm or more, tilted 45° or less. "On its feet" and "longest
+down" below are that rule's, which `check.py` no longer prints.
 
 - **The string runs**: a probe of 64 worlds on the Mac's CPU (stay upright on, t10-500 as the
   learner, 300 steps) had no NaN on either duck, at most 39 contacts a world (`nconmax` 200) and 190
-  constraint rows (`njmax` 1500); `nan_state` read 0 at every judged checkpoint from t13 to t18 on
+  constraint rows (`njmax` 1500); `nan_state` read 0 at every judged checkpoint from t13 to t24 on
   the L4.
 - **When it goes taut**: in every bout judged for t13, t14, t15, t17, t18 and t19 the ends never
   stood 0.98 m apart, even dragging the other duck into the pit (the other duck lay down or gave
-  way). Only t16, whose reference stood and resisted, had it taut (28 of 30 traced bouts).
+  way). Only t16, whose reference stood and resisted, had it taut (28 of 30 traced bouts). Against
+  t20-500, which stands and resists, t22-250, t23-250 and t24-250 had it taut within 0.4 s in every
+  bout.
 - **The reference search** (stay upright 1.0, warm-started from t7-250, the old reference, and
   against it; ratings against t7-250):
   - t13, t14 (Win ground 2.0, seeds 1 and 2): on their feet 99 to 100 % of every bout (trunk 7 to
@@ -322,15 +437,17 @@ All numbers are from the Mac, indicative: the Space (x86) rates differently.
     7 s, down 0.32 to 0.58 s), -17.8 cm at 250, 500, 750. Cancelled. Seeds diverge: judge a second
     seed before building on one.
   - The pick, t15-250: it passed U and R1 with the highest rating, and beat t15-500 and t15-750
-    10-0 each (17 pits). It became the reference duck.
+    10-0 each (17 pits). It was the reference duck until t20-500.
 - **Postures** (trunk height and tilt over a bout, and how long the trunk touched the floor):
-  standing 12.0 cm; t15-250 a low crouch, median 8.3 cm (lowest 5.9), 34°, never touching the floor;
-  t13-500 9.3 cm, 26°; t10-500 4.5 cm, 57°, never touching it either (its legs carry it; stay
-  upright calls it down); t7-250 lies with its trunk on the floor 73 to 88 % of a bout.
+  standing 12.0 cm; t15-250 a low crouch, median 8.3 cm (lowest 5.9), 34°, its trunk never on the
+  floor (its head was: "The bow", above); t13-500 9.3 cm, 26°; t10-500 4.5 cm, 57°, its trunk never
+  on the floor either (its legs carry it; stay upright called it down); t7-250 lies with its trunk on
+  the floor 73 to 88 % of a bout.
 - **The candidate search** (stay upright 1.0, Win ground 4.0, warm-started from t15-250 and against
   it; ratings against t15-250):
   - t17 (seed 1): +132.3 cm at 250 (the reference in the pit 10 of 10, median 14.3 s, on its feet 54
-    to 62 %, longest down 0.16 to 0.28 s, trunk median 7.2 cm, tilt 40°, never touching the floor),
+    to 62 %, longest down 0.16 to 0.28 s, trunk median 7.2 cm, tilt 40°, its trunk never on the
+    floor, its head on it),
     +27.6 at 500, +64.5 at 750.
   - t18 (seed 2): +134.0 at 250 (longest down under 0.30 s in 9 bouts of 10), +133.2 at 500, +63.0
     at 750.
@@ -338,16 +455,16 @@ All numbers are from the Mac, indicative: the Space (x86) rates differently.
     pits), t17-250 23 (23 pits), t18-500 4; but t18-250 and t18-500 sat down for up to 30 and 43 s
     against other ducks, where t17-250 was never down past 0.24 s. t18-750 lost 0-10 to t17-250, all
     by pit.
-  - The pick, the owner's candidate: t17-250, the only one that stays on its feet against other
-    ducks, the most pits.
+  - The pick, the owner's candidate then: t17-250, the only one that stays on its feet against
+    other ducks, the most pits. It pulled bowed onto its head, and t23-250 replaced it.
 - **The ducks trained before t15-250** rate against it: t7-250 -139.1 cm, t10-500 -138.6,
   t9r-1000 -132.1, each dragged into the pit in every bout, within 13 to 29 s. t15-250 against
   itself rates -1.7 cm.
 - t19, the recipe as shipped (stay upright 0.0, Win ground 2.0, warm start and opponent t15-250),
   judged at 250 on the Mac: +131.5 cm against t15-250, the reference in the pit 10 of 10 (median
   29.7 s), backed 10 of 10. A low crouch: on its feet 5 to 11 %, tilt 46 to 47°, trunk median 7.2 cm,
-  never touching the floor. t12, the same knobs before the ring, rated +140.3 cm at 500 against
-  t7-250.
+  its trunk never on the floor, its head on it. t12, the same knobs before the ring, rated +140.3 cm
+  at 500 against t7-250.
 
 ### Before the ring (2026-10-20 and 21: a 4 m lane with walls, a massless string, t7-250 the reference)
 
