@@ -657,31 +657,29 @@ def _relu_actor(tmp_path):
 
 
 def test_the_opponent_net_is_its_onnx():
-    """On observations as the net's normalizer saw them: its mean plus its std times N(0, 1)."""
-    onnx_path = opponent.REFERENCE
-    actor = opponent.load_actor(onnx_path)
+    """On observations as the reference's normalizer saw them: its mean plus its std times N(0, 1)."""
+    actor = opponent.load_actor(opponent.REFERENCE)
     noise = torch.from_numpy(np.random.default_rng(0).normal(size=(1000, 61)).astype(np.float32))
     obs = actor[0].mean + actor[0].std * noise
-    session = onnxruntime.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    session = onnxruntime.InferenceSession(str(opponent.REFERENCE), providers=["CPUExecutionProvider"])
     theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in obs.numpy()])
     with torch.no_grad():
         np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-5)
 
 
 def test_the_learner_starts_as_the_reference_duck():
-    """RL_CFG names its actor (the reference's); PPO builds it from RL_CFG as below. The rows are observations as the
-    net's normalizer saw them (its constant command slots constant)."""
-    onnx_path = opponent.REFERENCE
-    normalize = opponent.load_actor(onnx_path)[0]
+    """RL_CFG names its actor; PPO builds it from RL_CFG as below. The rows are observations as the
+    reference's normalizer saw them (its constant command slots constant)."""
+    normalize = opponent.load_actor(opponent.REFERENCE)[0]
     noise = torch.from_numpy(np.random.default_rng(0).normal(size=(4096, 61)).astype(np.float32))
     rows = normalize.mean + normalize.std * noise
     obs = TensorDict({"actor": rows}, batch_size=[len(rows)])
     cfg = tug.RL_CFG.actor
-    assert resolve_callable(tug.RL_CFG.actor.class_name) is opponent.ReferenceActor
-    actor = opponent.ReferenceActor(
+    assert resolve_callable(cfg.class_name) is opponent.ReferenceActor
+    actor = resolve_callable(cfg.class_name)(
         obs, {"actor": ["actor"]}, "actor", 14, hidden_dims=cfg.hidden_dims, activation=cfg.activation,
         obs_normalization=cfg.obs_normalization, distribution_cfg=dict(cfg.distribution_cfg))
-    session = onnxruntime.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    session = onnxruntime.InferenceSession(str(opponent.REFERENCE), providers=["CPUExecutionProvider"])
     theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in rows.numpy()])
     with torch.no_grad():
         np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-5)
@@ -705,12 +703,11 @@ def test_a_graph_the_loader_does_not_know_is_refused(tmp_path):
 
 
 def test_the_reference_ships_with_the_challenge():
-    shipped = opponent.REFERENCE
-    assert shipped.read_bytes() == (ASSET_ROOT / "policies" / EVENT.rating.reference).read_bytes()
+    assert opponent.REFERENCE.read_bytes() == (ASSET_ROOT / "policies" / EVENT.rating.reference).read_bytes()
     root = Path(microduck_challenges.__file__).parents[2]
     listed = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=root,
                             capture_output=True, text=True, check=True).stdout.split()
-    assert f"src/microduck_challenges/tug_of_war/{shipped.name}" in listed   # hf_jobs.py tars exactly this list
+    assert "src/microduck_challenges/tug_of_war/reference.onnx" in listed   # hf_jobs.py tars exactly this list
 
 
 def test_the_opponent_acts_on_the_arenas_joints(live):
@@ -893,6 +890,9 @@ def test_a_bout_line_says_how_a_walked(arena_model):
     from microduck_challenges.tug_of_war import check
     for side in ("west", "east"):
         assert check.posture(_posed_bout([WALK] * 50, side), side, arena_model) == "upright 100 % · longest out 0.00 s · feet only 100 % · standing still"
+    for side in ("west", "east"):
+        assert check.posture(_posed_bout([dict(WALK, pitch_deg=15.0)] * 50, side), side, arena_model).startswith("upright 100 % · ")
+        assert check.posture(_posed_bout([dict(WALK, pitch_deg=-15.0)] * 50, side), side, arena_model).startswith("upright 0 % · ")
     assert check.posture(_posed_bout([BOW] * 50, "west"), "west", arena_model).startswith("upright 0 % · longest out 1.00 s · ")
     dipped = _posed_bout([WALK] * 20 + [BOW] * 15 + [WALK] * 15, "west")
     assert check.posture(dipped, "west", arena_model).startswith("upright 70 % · longest out 0.30 s · ")

@@ -119,7 +119,7 @@ def posture(outcome: BoutOutcome, side: str, model) -> str:
         head_z[f] = data.xipos[head, 2]
         pairs = data.contact.geom
         sites[f] = data.site_xpos[soles]
-        on_course = np.isin(pairs[:, ::-1], course)
+        on_course = np.isin(pairs[:, ::-1], course)   # a pair in either order: (ours, course) or (course, ours)
         contact[f] = [(np.isin(pairs, shoe) & on_course).any() for shoe in shoes]
         feet_only[f] = not (np.isin(pairs, body) & on_course).any()
     w, x, y, z = trace[a, :, 3:7].T

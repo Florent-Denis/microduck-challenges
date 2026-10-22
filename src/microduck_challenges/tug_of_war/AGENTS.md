@@ -101,8 +101,9 @@ sag gain 0.1), where the learner's are drawn per env.
       --env.actions.opponent.onnx walker.onnx
   ```
 
-  The walker (`walker.onnx`, `WalkerActor` and the opponent's `onnx` field) is only at that commit:
-  later commits start from the reference and play it.
+  The walker (`walker.onnx`, `WalkerActor` and the opponent's `onnx` field) is in the history up to
+  `c2333dd` and gone since `10cc7aa`; t20 reproduces only at `8391bf7`. Later commits start from the
+  reference and play it.
 - `win` pays (+50) when the opponent drops into the pit, `out` costs (-50) when the learner does (and
   when `fell` ends the episode), `marker_ground` pays the new ground the marker wins towards the
   learner, `pit_margin_reward` the ground kept between the learner's string end and the pit.
@@ -227,18 +228,19 @@ Agree with the user before the first run:
   ```
 
   Healthy, as measured against the walking-upright reference:
-  - the owner's recipe (stay upright 1.0, Win ground 4.0; t23 at 250): `down` 1.5 an episode at
-    iteration 50 and 0.8 at 250, `marker_ground` 0.19 at 50 and 0.24 from 100 on, `win` 0.02,
-    `opponent_in_pit` 8.3, the learner's `in_pit` 0, episodes 432 control steps (the reference in
-    the pit within about 2.5 s);
+  - the owner's recipe (stay upright 1.0, Win ground 4.0; t23 at 250): `down` 1.5 at
+    iteration 50 and 0.8 at 250 (worlds a step), `marker_ground` 0.19 at 50 and 0.24 from 100 on, `win` 0.02,
+    `opponent_in_pit` 8.3, the learner's `in_pit` 0, episodes 432 control steps (8.6 s of training; in
+    a Mac bout the reference is in the pit within about 2.5 s);
   - the recipe as shipped (t24): the learner's `in_pit` 5.7 at 100 falling to 0.7 by 250, while
     `opponent_in_pit` rose to 6.7 and episodes to 256 control steps.
 
   Then it decays, and the gait goes first: `upright` and `head_pose_tracking` rise while `air_time`
   and `opponent_in_pit` fall, the feet planted and sliding (t23 from 250 to 500: `upright` 0.18 to
   0.33, `opponent_in_pit` 8.3 to 5.3; t21 from 500 to 999, most of it after about 650: `upright`
-  0.17 to 0.72, `head_pose_tracking` 0.33 to 1.43, `air_time` 0.008 to 0.002). That decay is the known shape, not a broken run: judge the checkpoints at 250,
-  500, 750 and 1000 and keep the best, not the last.
+  0.17 to 0.72, `head_pose_tracking` 0.33 to 1.43, `air_time` 0.008 to 0.002). That decay is the
+  known shape, not a broken run: judge the checkpoints at 250, 500, 750 and 1000 and keep the best,
+  not the last.
   Warning signs: `marker_ground` flat near 0.035 with the learner's `in_pit` near 1 (t16 never
   found the pull and was dragged in); `marker_ground` flat near 0.01 while `upright` rises (t13,
   t14 stood and never pulled); `fell`, `down` or the learner's `in_pit` climbing; `nan_state` in more
@@ -303,8 +305,9 @@ curves):
 
 - **U2** (walking upright, only for a duck meant to walk upright): in at least 9 of the 10 bouts
   `upright` is 90 % or more and `longest out` under 0.30 s. The owner's ducks passed it twice:
-  against the reference, and against a duck that pulls bowed onto its head (t15-250, the reference
-  before t20-500). In a cup your duck meets other players' ducks, and must stay upright even when
+  against their training opponent (the reference), and against a duck that pulls bowed onto its head
+  (t15-250, the reference before t20-500; `git show
+  8391bf7:src/microduck_challenges/tug_of_war/reference.onnx`). In a cup your duck meets other players' ducks, and must stay upright even when
   it loses.
 - **S** (stepping): in at least 8 of the 10 bouts `standing still`, or `steps/s` 2.0 or more with
   `slide` 20 % or less. A pass that rests on `standing still` in more than 2 of the 10 bouts is not
@@ -365,15 +368,16 @@ All numbers are from the Mac, indicative: the Space (x86) rates differently.
 - **The shin**: posed at random within every band, a shin touched the floor in 2.2 % of 200,000
   poses, the trunk at 10.0–11.1 cm with a foot down. The bands alone let a duck kneel, so stay
   upright also watches every body but the feet (`body_ground_contact`). A trunk sunk to 3 cm fires
-  it on the trunk, both hips and both shins; a duck standing, then toppling, never fired it in 60
-  steps. It cost nothing measurable on the L4 (t20 7.3 s an iteration, t15 9.8 s without it). The
+  it on the trunk, both hips and both shins; its feet never fire it: no slot fired in 60
+  steps of a duck standing, then tipping forward (the pitch band ended each episode before any body
+  landed). It cost nothing measurable on the L4 (t20 7.3 s an iteration, t15 9.8 s without it). The
   walker as both ducks under the rule (64 worlds, 300 steps): upright 99 % of world-steps, no NaN,
   15 contacts and 94 constraint rows a world at most.
 - **The reference search, t20 and t21** (commit `8391bf7`, seeds 1 and 2, stay upright 1.0, Win
   ground 4.0, started as the walker and against it; judged at 250, 500, 750 and 999; no lever was
   needed):
   - every checkpoint stayed upright against the walker and against t15-250 but one: t21-750
-    (79–80 % upright in two bouts against t15-250, 0.40 s out);
+    (79–80 % upright in two bouts against t15-250, 0.40–0.42 s out);
   - t20-250 planted both feet after about 3 s and slid back (0.1–0.5 steps/s, slide 25–44 %);
     t21-250 passed S, but all 8 of its passes stood still: anchored, ruled out; t21-500 and
     t21-999 planted and slid (S 1 and 0 of 10);
@@ -394,8 +398,9 @@ All numbers are from the Mac, indicative: the Space (x86) rates differently.
   - at 250: t22 +142.6, t23 +143.3 cm, the reference in the pit 10 of 10 at about 2.5 s, taut
     within 0.4 s, upright 100 %, 4.2–6.9 steps/s, slide 7–10 %; against t15-250 both stayed
     upright (97–100 %) and were dragged in 9 of 10;
-  - every later checkpoint still rated +117.0 to +141.7 cm but slid and failed S: t22-500 (4 of
-    10), t22-750 (0, slide 36–73 %), t23-500 (7), t23-750 (4), t23-999 (2); t23-250 beat t23-500
+  - every later checkpoint still rated +117.0 to +141.7 cm but failed S: t22-500 (4 of
+    10), t22-750 (0, slide 36–73 %), t23-500 (7, on slow
+    steps of 0.9–1.9 a second, slide 16 % at most), t23-750 (4), t23-999 (2); t23-250 beat t23-500
     10-0 both ways;
   - the round robin t22-250 against t23-250, 20 bouts each as A: t23-250 won 36 (36 pits) and lost
     4, stepping 2.1–4.3 times a second; t22-250 stepped 1.0–2.1 times and failed S;
