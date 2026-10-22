@@ -649,7 +649,8 @@ def make_env_cfg(
         params={"offset": STRING_OFFSET, "pit_edge_x": -PIT_M / 2, "scale": 0.35},
     )
     # Either pit ends the episode (terminations below), as it ends a bout on the
-    # Arena (D9): the learner's or, training only, its fall costs `out`; the
+    # Arena (D9): the learner's costs `out`, and so does its training-only fall
+    # unless stay_upright is on, where going down pays its own `down` (D22); the
     # opponent's pays `win`. Both in on one step pay nothing, the rarest end.
     cfg.rewards["out"] = RewardTermCfg(func=ended_by, weight=-50.0, params={"terms": ("in_pit",) if stay_upright else ("in_pit", "fell")})
     if stay_upright:

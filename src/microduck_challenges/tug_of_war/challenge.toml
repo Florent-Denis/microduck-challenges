@@ -1,7 +1,5 @@
-# The Tug of War: two ducks neck to neck over a pit, each pulling by walking
-# backwards; the pit decides. The learner starts as the Arena's reference duck
-# and trains against it; it peaks early (t10: 500 of 1000), so keep the best
-# checkpoint, not the last.
+# The Tug of War: two ducks tied neck to neck in a 3 m ring, over a pit; only the pit decides.
+# The learner starts as the reference duck and trains against it; keep its best checkpoint, not the last.
 event = "tug-of-war"
 task  = "Mjlab-TugOfWar-MicroDuck"
 kind  = "perpetual"
@@ -17,7 +15,7 @@ seed           = 1
 
 [params.pull_reward]
 label = "Win ground"
-value = 4.0
+value = 2.0
 min   = 0.5
 max   = 5.0
 
@@ -38,6 +36,6 @@ max   = 4.0
 # many pits.
 [params.stay_upright]
 label = "Stay upright"
-value = 1.0
+value = 0.0
 min   = 0.0
 max   = 2.0

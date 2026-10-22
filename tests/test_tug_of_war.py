@@ -287,6 +287,17 @@ def test_the_knobs_are_labelled_for_what_they_do():
     assert (stay["label"], stay["min"], stay["max"]) == ("Stay upright", 0.0, 2.0)
 
 
+def test_the_recipe_users_get_lets_the_duck_go_down():
+    """Off by default (owner, 2026-10-21): other players may crawl; the owner's ducks trained with stay_upright 1.0."""
+    knob = tomllib.loads((Path(tug.__file__).with_name("challenge.toml")).read_text())["params"]["stay_upright"]
+    shipped = tug.make_env_cfg()   # the committed toml, not the fixture's
+    assert (knob["label"], knob["value"]) == ("Stay upright", 0.0)
+    params = tomllib.loads((Path(tug.__file__).with_name("challenge.toml")).read_text())["params"]
+    assert {k: params[k]["value"] for k in ("pull_reward", "back_reward", "upright_reward")} == {
+        "pull_reward": 2.0, "back_reward": 3.0, "upright_reward": 1.0}   # t12 verified the users' recipe on these
+    assert "down" not in shipped.terminations and "fell" in shipped.terminations
+
+
 def _duck(pos, quat, **fields):
     return SimpleNamespace(data=SimpleNamespace(root_link_pos_w=torch.tensor(pos), root_link_quat_w=torch.tensor(quat), **fields))
 

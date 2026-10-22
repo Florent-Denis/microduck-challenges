@@ -4,7 +4,7 @@
 
 Plays bouts between the two (B defaults to the reference duck) on the Arena's own physics
 (arena.tug.run_bout), bout k on seed k, sides swapped after each (A starts on the west platform),
-and prints a line per bout (who lost and how it was pulled), then the tally.
+and prints a line per bout (who lost, how it was pulled and how A stood), then the tally.
 """
 
 import argparse
@@ -25,7 +25,7 @@ from .rewards import UPRIGHT_TILT_DEG, UPRIGHT_Z_M
 
 EVENT = "tug-of-war"
 SIDES = ("west", "east")
-TAUT_M = 0.98  # the string's ends this far apart: it is taut (a 1 m rope sags short of its length)
+TAUT_M = 0.98  # the ends this far apart: taut; the 80 g string sags short of it even while dragging a duck in
 BACKED_S = 2.0  # where A's retreat is read
 LIP_M = 0.08  # A's frames with its trunk this near the pit's lip are left out of the upright reading
 

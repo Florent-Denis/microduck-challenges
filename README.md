@@ -29,12 +29,12 @@ A performance can also be a troupe of up to 8 ducks in one physics. Each duck ha
 (yours, or any public one on the Hub pinned to a commit, on legs or rollers), place, keyframes,
 voice and song: see the guide's Troupe and Placement sections.
 
-The Tug of War is a duel: two ducks neck to neck over a pit, each pulling a 1 m string by walking
+The Tug of War is a duel: two ducks neck to neck in a 3 m ring, over a pit, each pulling a 1 m string by walking
 backwards at `-0.30 m/s`; only the pit decides, and the marker if nobody falls in. The Arena rates a
 policy by five 45 s bouts against its reference duck, in centimetres of ground won plus a pit bonus
 (higher wins), and every entry plays the weekly cup. The recipe starts the learner as that reference
-duck and trains it against it for 1000 iterations; it peaks early (about 500), so rate every
-checkpoint and keep the best, not the last.
+duck and trains it against it for 1000 iterations; it peaks early (250 to 500), so rate every
+checkpoint and keep the best, not the last. Its `stay_upright` knob, off by default, keeps a duck on its feet.
 Play two policies against each other (B defaults to the reference) with
 `uv run --frozen --group workshop python -m microduck_challenges.tug_of_war.check A.onnx [B.onnx] [--bouts 10]`.
 
