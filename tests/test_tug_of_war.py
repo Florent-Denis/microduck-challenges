@@ -691,7 +691,7 @@ def test_the_learner_starts_as_the_reference_duck(class_name, onnx_path):
     theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in rows.numpy()])
     with torch.no_grad():
         np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-5)
-        assert actor.distribution.std_param.tolist() == pytest.approx([0.3] * 14)
+        assert actor.distribution.std_param.tolist() == pytest.approx([0.5] * 14)
         # PPO's update at the first rollout step, every env at one state: the reference's statistics hold.
         actor.update_normalization(TensorDict({"actor": rows[:1].expand(4096, -1)}, batch_size=[4096]))
         np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-2)
