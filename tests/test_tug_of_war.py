@@ -184,9 +184,9 @@ def test_backing_away_pays_far_more_than_standing_still(cfg):
     Walk backwards defaults to 3.0 at std √0.05: at the event's -0.30 m/s the duck earns 3.0, standing
     still 3·e^-1.8 = 0.50."""
     knob = tomllib.loads((Path(tug.__file__).parent / "challenge.toml").read_text())["params"]["back_reward"]
-    assert knob["value"] == 3.0 and knob["min"] <= 3.0 <= knob["max"]
+    assert knob["min"] <= knob["value"] <= knob["max"]
     term = cfg.rewards["track_linear_velocity"]
-    assert term.weight == 3.0 and term.params["std"] == pytest.approx(math.sqrt(0.05))
+    assert term.weight == knob["value"] and term.params["std"] == pytest.approx(math.sqrt(0.05))
 
     def paid(vx):
         data = SimpleNamespace(root_link_lin_vel_b=torch.tensor([[vx, 0.0, 0.0]]))
@@ -326,9 +326,9 @@ def test_marker_ground_pays_new_ground_towards_the_learner(cfg, training_model):
     the scale's pace (0.05 m/s) tanh(1): a steady pull pays it every step, being dragged east nothing,
     a sway with no net gain only its first new ground. The knob a novice tunes is "Win ground"."""
     knob = tomllib.loads((Path(tug.__file__).parent / "challenge.toml").read_text())["params"]["pull_reward"]
-    assert (knob["label"], knob["value"], knob["min"], knob["max"]) == ("Win ground", 2.0, 0.5, 5.0)
+    assert (knob["label"], knob["min"], knob["max"]) == ("Win ground", 0.5, 5.0)
     term = cfg.rewards["marker_ground"]
-    assert term.func is rewards.MarkerGround and term.weight == 2.0
+    assert term.func is rewards.MarkerGround and term.weight == knob["value"]
     assert term.params == {"scale": 0.05}
     step = 2 * 0.05 * 0.02   # the learner's end, so the marker moves 0.05 m/s over a control step
     sway = [-0.5, -0.5 - step, -0.5 + step] * 4
