@@ -326,8 +326,9 @@ def test_stay_upright_ends_a_down_duck_and_costs_its_pits():
 
 @pytest.fixture(scope="module")
 def upright_live():
-    """The owner's training env (stay upright 1.0), 2 envs; Task 3 names its opponent."""
+    """The owner's training env (stay upright 1.0), 2 envs, against the frozen walker as the reference's training is."""
     cfg = _cfg_with_knobs(stay_upright=1.0)
+    cfg.actions["opponent"].onnx = "walker.onnx"
     cfg.scene.num_envs = 2
     env = ManagerBasedRlEnv(cfg, device="cpu")
     env.reset()
@@ -656,30 +657,37 @@ def _relu_actor(tmp_path):
     return path
 
 
-def test_the_opponent_net_is_its_onnx():
-    """On observations as the reference's normalizer saw them: its mean plus its std times N(0, 1)."""
-    actor = opponent.load_actor(opponent.REFERENCE)
+ONNX_IDS = ["reference", "walker"]
+
+
+@pytest.mark.parametrize("onnx_path", [opponent.REFERENCE, opponent.WALKER], ids=ONNX_IDS)
+def test_the_opponent_net_is_its_onnx(onnx_path):
+    """On observations as the net's normalizer saw them: its mean plus its std times N(0, 1)."""
+    actor = opponent.load_actor(onnx_path)
     noise = torch.from_numpy(np.random.default_rng(0).normal(size=(1000, 61)).astype(np.float32))
     obs = actor[0].mean + actor[0].std * noise
-    session = onnxruntime.InferenceSession(str(opponent.REFERENCE), providers=["CPUExecutionProvider"])
+    session = onnxruntime.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in obs.numpy()])
     with torch.no_grad():
         np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-5)
 
 
-def test_the_learner_starts_as_the_reference_duck():
-    """RL_CFG names its actor; PPO builds it from RL_CFG as below. The rows are observations as the
-    reference's normalizer saw them (its constant command slots constant)."""
-    normalize = opponent.load_actor(opponent.REFERENCE)[0]
+@pytest.mark.parametrize("class_name, onnx_path", [("microduck_challenges.tug_of_war.opponent:ReferenceActor", opponent.REFERENCE),
+                                                   ("microduck_challenges.tug_of_war.opponent:WalkerActor", opponent.WALKER)],
+                         ids=ONNX_IDS)
+def test_the_learner_starts_as_the_reference_duck(class_name, onnx_path):
+    """RL_CFG names its actor (the reference's); PPO builds it from RL_CFG as below. The rows are observations as the
+    net's normalizer saw them (its constant command slots constant)."""
+    normalize = opponent.load_actor(onnx_path)[0]
     noise = torch.from_numpy(np.random.default_rng(0).normal(size=(4096, 61)).astype(np.float32))
     rows = normalize.mean + normalize.std * noise
     obs = TensorDict({"actor": rows}, batch_size=[len(rows)])
     cfg = tug.RL_CFG.actor
-    assert resolve_callable(cfg.class_name) is opponent.ReferenceActor
-    actor = resolve_callable(cfg.class_name)(
+    assert resolve_callable(tug.RL_CFG.actor.class_name) is opponent.ReferenceActor
+    actor = resolve_callable(class_name)(
         obs, {"actor": ["actor"]}, "actor", 14, hidden_dims=cfg.hidden_dims, activation=cfg.activation,
         obs_normalization=cfg.obs_normalization, distribution_cfg=dict(cfg.distribution_cfg))
-    session = onnxruntime.InferenceSession(str(opponent.REFERENCE), providers=["CPUExecutionProvider"])
+    session = onnxruntime.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in rows.numpy()])
     with torch.no_grad():
         np.testing.assert_allclose(actor(obs).numpy(), theirs, atol=1e-5)
@@ -702,12 +710,27 @@ def test_a_graph_the_loader_does_not_know_is_refused(tmp_path):
         opponent.load_actor(_relu_actor(tmp_path))
 
 
-def test_the_reference_ships_with_the_challenge():
-    assert opponent.REFERENCE.read_bytes() == (ASSET_ROOT / "policies" / EVENT.rating.reference).read_bytes()
+@pytest.mark.parametrize("shipped, arena_file", [(opponent.REFERENCE, EVENT.rating.reference),
+                                                  (opponent.WALKER, "BEST_alpha_walking.onnx")], ids=ONNX_IDS)
+def test_the_reference_ships_with_the_challenge(shipped, arena_file):
+    assert shipped.read_bytes() == (ASSET_ROOT / "policies" / arena_file).read_bytes()
     root = Path(microduck_challenges.__file__).parents[2]
     listed = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=root,
                             capture_output=True, text=True, check=True).stdout.split()
-    assert "src/microduck_challenges/tug_of_war/reference.onnx" in listed   # hf_jobs.py tars exactly this list
+    assert f"src/microduck_challenges/tug_of_war/{shipped.name}" in listed   # hf_jobs.py tars exactly this list
+
+
+def test_a_training_can_name_its_opponent(upright_live):
+    """The reference's training plays the frozen walker (--env.actions.opponent.onnx walker.onnx); the recipe plays the reference."""
+    assert tug.make_env_cfg().actions["opponent"].onnx == "reference.onnx"
+    net = upright_live.action_manager.get_term("opponent").policy
+    walker = opponent.load_actor(opponent.WALKER)
+    noise = torch.from_numpy(np.random.default_rng(0).normal(size=(1000, 61)).astype(np.float32))
+    obs = walker[0].mean + walker[0].std * noise
+    session = onnxruntime.InferenceSession(str(opponent.WALKER), providers=["CPUExecutionProvider"])
+    theirs = np.concatenate([session.run(None, {"obs": row[None]})[0] for row in obs.numpy()])
+    with torch.no_grad():
+        np.testing.assert_allclose(net(obs).numpy(), theirs, atol=1e-5)
 
 
 def test_the_opponent_acts_on_the_arenas_joints(live):
