@@ -8,7 +8,7 @@ arithmetic (arena/course.py, compile_tug) are copied here; tests/test_tug_of_war
 copy against the Arena's own model.
 
 `make_env_cfg` is the sprint's recipe (sprint_2m/env.py), the shortest way to a duck that steps
-backwards, with the three rewards a novice tunes read from challenge.toml ([params]). Everything
+backwards, with the knobs a novice tunes (the three reward weights and stay upright) read from challenge.toml ([params]). Everything
 here is yours to change; the robot (MICRODUCK_STANDUP_ROBOT_CFG) and the shared reward functions
 (microduck_mdp) come from mjlab_microduck, the tug's own terms from rewards.py. It carries these
 decisions, each commented where it is made:
@@ -26,7 +26,11 @@ decisions, each commented where it is made:
       study (2026-10-21), and never lowered: each step down from them was unstable there. Its
       armature, on every string dof, keeps mujoco_warp finite: without it every world turned NaN
       within 0.4 to 0.7 s, the rope's twist inertia (3e-8 kg m²) beside the ducks' terms being
-      beyond float32's precision once the rope touches a duck (study §5)
+      beyond float32's precision once the rope touches a duck (study §5). The training feet grip the
+      string harder than the Arena's: mjlab gives them contact priority 1 (the Arena's feet have 0)
+      and the string has 1, so a foot on it mixes friction to max(foot, 1.0), 1.0 to 1.3 with the
+      learner's randomised foot friction, against 1.0 in the Arena; neither number changes (the
+      string's are measured, the feet's priority keeps floor contact equal)
   D5  the Arena's numbers are copied below, pinned by the parity tests
   D6  the twist is the event's fixed command, -0.30 m/s backwards, in every env
   D7  the Arena's collision set (the standup robot: a dragged duck touches with its body) and
@@ -91,7 +95,7 @@ decisions, each commented where it is made:
       training episode and costs that many pits (-50 each, `down`). The numbers, measured on the
       robot (owner, 2026-10-21): standing, the trunk stands 11-12 cm; a sweep of poses with only
       the feet on the floor keeps it at 7.8 cm or more leaning back to 45°, so a puller may
-      lean; t10-500 sat at 5-6 cm, tilted 55°, its rear on the floor; a lying duck sits at
+      lean; t10-500 sat low, 4.5 cm and tilted 57°, its legs carrying it (no trunk-floor contact); a lying duck sits at
       3.6 cm. A tilt past 60° held 0.3 s is past 45° first, so `fell` has nothing left to
       catch. The owner's ducks train with it on; check.py reads how long A was down
 """

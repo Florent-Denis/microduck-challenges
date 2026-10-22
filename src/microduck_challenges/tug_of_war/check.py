@@ -25,7 +25,7 @@ from .rewards import UPRIGHT_TILT_DEG, UPRIGHT_Z_M
 
 EVENT = "tug-of-war"
 SIDES = ("west", "east")
-TAUT_M = 0.98  # the ends this far apart: taut; the 80 g string sags short of it even while dragging a duck in
+TAUT_M = 0.98  # the ends this far apart: taut; the string goes taut when the other duck stands and resists, and stays short of it when that duck lies down or gives way
 BACKED_S = 2.0  # where A's retreat is read
 LIP_M = 0.08  # A's frames with its trunk this near the pit's lip are left out of the upright reading
 

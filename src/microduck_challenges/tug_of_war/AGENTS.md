@@ -22,9 +22,10 @@ backwards. The rules, from `arena/events/tug-of-war.toml` in the installed Arena
   backs into them bounces off. The two ducks start on either side of the pit. Start from the `STAND`
   pose, 0.5 s untimed settle, joints perturbed by ±0.01 rad, heading by ±2°.
 - **The string**: 1.00 m, tied at the base of each neck, laid straight at the start. It is a real
-  rope, 80 g and 8 mm thick in sixteen pieces: it sags, and a duck can step or lie on it. Between two
-  ducks pulling, its ends stand about 0.9 m apart (at most 0.966 m in the bouts traced), its lowest
-  point at the canvas or down over the pit.
+  rope, 80 g and 8 mm thick in sixteen pieces: it sags, and a duck can step or lie on it. Its ends go
+  taut (0.98 m or more apart) when the other duck stands and resists; when that duck lies down or
+  gives way they stay short of it (at most 0.966 m in the bouts traced), its lowest point at the
+  canvas or down over the pit.
 - **Command**: the policy reads `[-0.30, 0, 0]`, constant for the whole bout: walk backwards at
   0.30 m/s. Head and body commands are zeros. It is never told its heading or its position.
 - **A bout**: only the pit decides. The first duck whose trunk drops into the pit loses; a duck that
@@ -69,7 +70,7 @@ sag gain 0.1), where the learner's are drawn per env.
   episode only. Above 0, `down` replaces `fell`: the learner is down when its trunk is under 7 cm
   (`UPRIGHT_Z_M`) or tilted past 45° (`UPRIGHT_TILT_DEG`), and down for 0.3 s straight ends the
   training episode and costs that many pits (-50 each). Standing, the trunk is at 12 cm; a puller
-  leaning back on its feet keeps it over 7 cm. Turn it on for a duck that must stay on its feet:
+  at 7 cm or more, apart from dips shorter than 0.3 s (t15-250's trunk median 8.3 cm, t17-250's 7.2 cm). Turn it on for a duck that must stay on its feet:
   the owner's ducks trained with it at 1.0, and Win ground at 4.0 (at 2.0 they stood and never
   pulled).
 - `win` pays (+50) when the opponent drops into the pit, `out` costs (-50) when the learner does (and
@@ -244,7 +245,8 @@ bout 1 · seed 1 · A west · B loses by pit at 14.20 s · never taut · A backe
 ```
 
 - **taut**: when the string's ends first stood 0.98 m apart (`TAUT_M`). Information only: "never
-  taut" is normal, the 80 g string sags short of it even while a duck drags the other in.
+  taut" is normal: the string goes taut when the other duck stands and resists, and stays short of
+  it when that duck lies down or gives way, even dragged into the pit.
 - **A backed**: how far A's end of the string moved away from the pit in the first 2 s, signed.
 - **marker**: where the string's middle ended, in cm towards A.
 - **on its feet**, **longest down**: the share of A's frames upright by stay upright's rule (trunk
@@ -301,9 +303,9 @@ All numbers are from the Mac, indicative: the Space (x86) rates differently.
   learner, 300 steps) had no NaN on either duck, at most 39 contacts a world (`nconmax` 200) and 190
   constraint rows (`njmax` 1500); `nan_state` read 0 at every judged checkpoint from t13 to t18 on
   the L4.
-- **It sags**: in every bout judged for t13, t14, t15, t17 and t18 against the reference (160), the
-  ends never stood 0.98 m apart, t15-250's ten pit wins included. Only t16, which never pulled and
-  lost all its bouts, had it taut (28 of 30).
+- **When it goes taut**: in every bout judged for t13, t14, t15, t17, t18 and t19 the ends never
+  stood 0.98 m apart, even dragging the other duck into the pit (the other duck lay down or gave
+  way). Only t16, whose reference stood and resisted, had it taut (28 of 30 traced bouts).
 - **The reference search** (stay upright 1.0, warm-started from t7-250, the old reference, and
   against it; ratings against t7-250):
   - t13, t14 (Win ground 2.0, seeds 1 and 2): on their feet 99 to 100 % of every bout (trunk 7 to
@@ -341,8 +343,11 @@ All numbers are from the Mac, indicative: the Space (x86) rates differently.
 - **The ducks trained before t15-250** rate against it: t7-250 -139.1 cm, t10-500 -138.6,
   t9r-1000 -132.1, each dragged into the pit in every bout, within 13 to 29 s. t15-250 against
   itself rates -1.7 cm.
-- The recipe as shipped (stay upright 0.0, Win ground 2.0) has not been trained on the ring yet;
-  t12, the same knobs before it, rated +140.3 cm at 500 against t7-250.
+- t19, the recipe as shipped (stay upright 0.0, Win ground 2.0, warm start and opponent t15-250),
+  judged at 250 on the Mac: +131.5 cm against t15-250, the reference in the pit 10 of 10 (median
+  29.7 s), backed 10 of 10. A low crouch: on its feet 5 to 11 %, tilt 46 to 47°, trunk median 7.2 cm,
+  never touching the floor. t12, the same knobs before the ring, rated +140.3 cm at 500 against
+  t7-250.
 
 ### Before the ring (2026-10-20 and 21: a 4 m lane with walls, a massless string, t7-250 the reference)
 

@@ -251,7 +251,7 @@ def _posed_env(z, tilt_deg):
 
 @pytest.mark.parametrize("z, tilt_deg, fires_at", [(0.09, 40.0, None), (0.12, 0.0, None), (0.06, 55.0, 15), (0.036, 7.0, 15), (0.10, 46.0, 15)])
 def test_the_upright_rule_lets_a_puller_lean_and_ends_a_sitting_duck(z, tilt_deg, fires_at):
-    """A puller leaning 40° at 9 cm stays in; t10-500's sit (6 cm, 55°), a belly-flat crawler (3.6 cm, 7°) and a 46° lean go
+    """A puller leaning 40° at 9 cm stays in; t10-500's low sit (4.5 cm, 57°, its legs carrying it), a belly-flat crawler (3.6 cm, 7°) and a 46° lean go
     down on the 15th straight step."""
     env = _posed_env(z, tilt_deg)
     term = rewards.Down(None, env)
@@ -289,12 +289,12 @@ def test_the_knobs_are_labelled_for_what_they_do():
 
 def test_the_recipe_users_get_lets_the_duck_go_down():
     """Off by default (owner, 2026-10-21): other players may crawl; the owner's ducks trained with stay_upright 1.0."""
-    knob = tomllib.loads((Path(tug.__file__).with_name("challenge.toml")).read_text())["params"]["stay_upright"]
+    params = tomllib.loads((Path(tug.__file__).with_name("challenge.toml")).read_text())["params"]
+    knob = params["stay_upright"]
     shipped = tug.make_env_cfg()   # the committed toml, not the fixture's
     assert (knob["label"], knob["value"]) == ("Stay upright", 0.0)
-    params = tomllib.loads((Path(tug.__file__).with_name("challenge.toml")).read_text())["params"]
     assert {k: params[k]["value"] for k in ("pull_reward", "back_reward", "upright_reward")} == {
-        "pull_reward": 2.0, "back_reward": 3.0, "upright_reward": 1.0}   # t12 verified the users' recipe on these
+        "pull_reward": 2.0, "back_reward": 3.0, "upright_reward": 1.0}   # t19 verified this recipe against t15-250 on the ring (+131.5 cm at 250, Mac)
     assert "down" not in shipped.terminations and "fell" in shipped.terminations
 
 
@@ -491,21 +491,34 @@ def test_the_opponent_starts_where_the_arenas_east_duck_does(live):
 
 def test_a_reset_lays_the_string_between_the_ducks(live):
     data, model = live.sim.data, live.sim.mj_model
+    dofs = _string_dofs(model)
+    site = lambda name: data.site_xpos[:, model.site(name).id]
+    points = lambda: torch.stack([site(f"{tug.STRING}p{k}") for k in range(17)], dim=1)   # (2, 17, 3)
+
+    def assert_laid_straight_and_centred(rows):
+        pts, west, east = points()[rows], site("robot/string_end")[rows], site("opponent/string_end")[rows]
+        gap = (east - west).norm(dim=-1)                                                     # 0.96–1.00 m: the starts' jitter
+        assert (pts[:, 8] - (west + east) / 2).norm(dim=-1).max() <= 1e-5                    # centred between the ties
+        over = (1.0 - gap).abs() / 2 + 1e-5                                                  # a straight 1 m string misses ties off 1 m apart
+        assert ((pts[:, 0] - west).norm(dim=-1) <= over).all() and ((pts[:, 16] - east).norm(dim=-1) <= over).all()
+        line = pts[:, 16] - pts[:, 0]
+        off = torch.linalg.cross(pts - pts[:, :1], line[:, None].expand_as(pts)).norm(dim=-1) / line.norm(dim=-1)[:, None]
+        assert off.max() <= 1e-5                                                             # straight
+        assert not data.qvel[rows][:, dofs].any()
+
     for _ in range(5):   # the string has swung and is moving when the reset comes
         live.step(torch.full((2, 14), 0.3))
-    assert data.qvel[:, _string_dofs(model)].any()
+    assert data.qvel[:, dofs].any()
     live.reset()
-    site = lambda name: data.site_xpos[:, model.site(name).id]
-    points = torch.stack([site(f"{tug.STRING}p{k}") for k in range(17)], dim=1)          # (2, 17, 3)
-    west, east = site("robot/string_end"), site("opponent/string_end")
-    gap = (east - west).norm(dim=-1)                                                         # 0.96–1.00 m: the starts' jitter
-    assert (points[:, 8] - (west + east) / 2).norm(dim=-1).max() <= 1e-5                     # centred between the ties
-    over = (1.0 - gap).abs() / 2 + 1e-5                                                      # a straight 1 m string misses ties off 1 m apart
-    assert ((points[:, 0] - west).norm(dim=-1) <= over).all() and ((points[:, 16] - east).norm(dim=-1) <= over).all()
-    line = points[:, 16] - points[:, 0]
-    off = torch.linalg.cross(points - points[:, :1], line[:, None].expand_as(points)).norm(dim=-1) / line.norm(dim=-1)[:, None]
-    assert off.max() <= 1e-5                                                                # straight
-    assert not data.qvel[:, _string_dofs(model)].any()
+    assert_laid_straight_and_centred(slice(None))
+
+    for _ in range(5):   # a reset of env 1 alone leaves env 0's string where it swung
+        live.step(torch.full((2, 14), 0.3))
+    kept_points, kept_qvel = points()[0].clone(), data.qvel[0, dofs].clone()
+    assert kept_qvel.any()
+    live.reset(env_ids=torch.tensor([1], device=live.device))
+    assert torch.equal(points()[0], kept_points) and torch.equal(data.qvel[0, dofs], kept_qvel)
+    assert_laid_straight_and_centred(slice(1, 2))
 
 
 def test_the_marker_is_the_strings_middle_point(live):
