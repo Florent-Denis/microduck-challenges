@@ -857,15 +857,44 @@ WALK = dict(z=0.12, pitch_deg=-1.0, roll_deg=2.0, dneck_deg=8.0, dhead_deg=-1.0)
 BOW = dict(z=0.072, pitch_deg=-38.0, roll_deg=-11.0, dneck_deg=-69.0, dhead_deg=-6.0)  # t17-250
 
 
+def _feet(n=100, period=20, lag=10):
+    """(contact, feet): each foot on the floor period/2 frames then in the air as long, the right one `lag` frames behind;
+    in the air a foot is 1 cm up and moves 3 mm back a frame, on the floor it stays still."""
+    frame = np.arange(n)
+    contact = np.stack([frame % period < period // 2, (frame - lag) % period < period // 2], axis=1)
+    feet = np.zeros((n, 2, 3))
+    feet[..., 2] = np.where(contact, 0.0, 0.01)
+    feet[..., 0] = -0.003 * np.cumsum(~contact, axis=0)
+    return contact, feet
+
+
+def test_gait_counts_clear_steps_and_the_slide():
+    from microduck_challenges.tug_of_war import check
+    contact, feet = _feet()
+    every = np.ones(100, dtype=bool)
+    assert check.gait(contact, feet, every) == "4.0 steps/s · slide 0 %"   # left lands at 20, 40, 60, 80; right at 30, 50, 70, 90
+    assert check.gait(contact, feet, np.arange(100) < 50) == "3.0 steps/s · slide 0 %"   # 20, 40 and 30 in the counted second
+    dragged = np.zeros((100, 2, 3))
+    dragged[:, :, 0] = -0.001 * np.arange(100)[:, None]                   # both feet down, slid 1 mm a frame
+    assert check.gait(np.ones((100, 2), dtype=bool), dragged, every) == "0.0 steps/s · slide 100 %"
+    chatter = np.ones((100, 2), dtype=bool)
+    chatter[10::10, 0] = False                                            # the left foot off one frame in ten
+    lifted = dragged.copy()
+    lifted[10::10, 0, 2] = 0.001                                          # 1 mm up: no clear step
+    assert check.gait(chatter, lifted, every) == "0.0 steps/s · slide 91 %"   # 180 of 198 moves in contact
+    assert check.gait(np.ones((100, 2), dtype=bool), np.zeros((100, 2, 3)), every) == "standing still"
+    assert check.gait(contact, feet, np.zeros(100, dtype=bool)) == "standing still"
+
+
 def test_a_bout_line_says_how_a_walked(arena_model):
     from microduck_challenges.tug_of_war import check
     for side in ("west", "east"):
-        assert check.posture(_posed_bout([WALK] * 50, side), side, arena_model) == "upright 100 % · longest out 0.00 s · feet only 100 %"
+        assert check.posture(_posed_bout([WALK] * 50, side), side, arena_model) == "upright 100 % · longest out 0.00 s · feet only 100 % · standing still"
     assert check.posture(_posed_bout([BOW] * 50, "west"), "west", arena_model).startswith("upright 0 % · longest out 1.00 s · ")
     dipped = _posed_bout([WALK] * 20 + [BOW] * 15 + [WALK] * 15, "west")
     assert check.posture(dipped, "west", arena_model).startswith("upright 70 % · longest out 0.30 s · ")
-    assert check.posture(_posed_bout([dict(WALK, z=0.02)] * 50, "west"), "west", arena_model).endswith(" · feet only 0 %")
-    assert check.posture(_posed_bout([BOW] * 50, "west", x=0.20), "west", arena_model) == "upright 100 % · longest out 0.00 s · feet only 100 %"   # at the lip: left out
+    assert check.posture(_posed_bout([dict(WALK, z=0.02)] * 50, "west"), "west", arena_model).endswith(" · feet only 0 % · standing still")
+    assert check.posture(_posed_bout([BOW] * 50, "west", x=0.20), "west", arena_model) == "upright 100 % · longest out 0.00 s · feet only 100 % · standing still"   # at the lip: left out
 
 
 def test_the_summary_counts_who_lost_and_how(arena_model):
@@ -889,6 +918,7 @@ def test_the_check_plays_the_reference_by_default(capsys):
     assert len(lines) == 3
     assert lines[0].startswith("bout 1 · seed 1 · A west") and lines[1].startswith("bout 2 · seed 2 · A east")
     assert lines[2].startswith("A ") and "median decision" in lines[2]
+    assert all("upright 100 % · longest out 0.00 s · feet only 100 % · " in line and "steps/s" in line for line in lines[:2])
 
 
 def test_an_unreadable_policy_is_reported(tmp_path, capsys):
