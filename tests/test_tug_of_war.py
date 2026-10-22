@@ -242,42 +242,115 @@ def test_a_fall_is_the_arenas_rule(cfg):
     assert term(env, **params).tolist() == [False, False]
 
 
-def _posed_env(z, tilt_deg):
-    """One env whose learner's trunk is z m high and tilted tilt_deg: projected gravity z is -cos(tilt)."""
-    gravity = torch.tensor([[math.sin(math.radians(tilt_deg)), 0.0, -math.cos(math.radians(tilt_deg))]])
-    data = SimpleNamespace(root_link_pos_w=torch.tensor([[0.0, 0.0, z]]), projected_gravity_b=gravity)
-    return SimpleNamespace(num_envs=1, device="cpu", scene={"robot": SimpleNamespace(data=data)})
+# Postures the posture probe measured (2026-10-22, pull-phase medians): trunk z m, pitch ° (+ the trunk's top leaning away
+# from the opponent), roll °, head COM z m, neck_pitch and head_pitch off STAND °.
+WALKER_BACK = (0.120, -1.0, 2.0, 0.236, 8.0, -1.0)     # BEST_alpha_walking backwards at -0.40
+WALKER_STILL = (0.116, 2.0, 2.0, 0.234, 1.0, -1.0)     # it, at the tug's -0.30: it stands
+LEANING = (0.101, 19.5, -9.5, 0.181, 29.5, -29.5)      # a puller leaning back, inside every edge
+T17_250 = (0.072, -38.0, -11.0, 0.063, -69.0, -6.0)    # bowed, the head on the floor
+T15_250 = (0.084, -33.0, 9.0, 0.064, -85.0, -10.0)
+T19_250 = (0.071, -44.0, 12.0, 0.063, -50.0, 12.0)
+OUT_BY_ONE = [(0.095, -1.0, 2.0, 0.236, 8.0, -1.0), (0.120, -11.0, 2.0, 0.236, 8.0, -1.0), (0.120, 21.0, 2.0, 0.236, 8.0, -1.0),
+              (0.120, -1.0, 11.0, 0.236, 8.0, -1.0), (0.120, -1.0, -11.0, 0.236, 8.0, -1.0), (0.120, -1.0, 2.0, 0.175, 8.0, -1.0),
+              (0.120, -1.0, 2.0, 0.236, -31.0, -1.0), (0.120, -1.0, 2.0, 0.236, 8.0, 31.0)]
+ENTITY = SimpleNamespace(name="robot", body_ids=[0], joint_ids=[0, 1])
+STAND = 0.3491   # neck_pitch and head_pitch at STAND, the training's default_joint_pos
 
 
-@pytest.mark.parametrize("z, tilt_deg, fires_at", [(0.09, 40.0, None), (0.12, 0.0, None), (0.06, 55.0, 15), (0.036, 7.0, 15), (0.10, 46.0, 15)])
-def test_the_upright_rule_lets_a_puller_lean_and_ends_a_sitting_duck(z, tilt_deg, fires_at):
-    """A puller leaning 40° at 9 cm stays in; t10-500's low sit (4.5 cm, 57°, its legs carrying it), a belly-flat crawler (3.6 cm, 7°) and a 46° lean go
-    down on the 15th straight step."""
-    env = _posed_env(z, tilt_deg)
+def _rule_inputs(poses):
+    """is_upright's (z, gravity_b, head_z, neck_dev) for rows of postures: projected gravity (-sin pitch, -sin roll,
+    -√(1 - both²)), neck_pitch and head_pitch off STAND in rad."""
+    poses = np.asarray(poses, dtype=np.float64)
+    x, y = -np.sin(np.radians(poses[:, 1])), -np.sin(np.radians(poses[:, 2]))
+    return poses[:, 0], np.stack([x, y, -np.sqrt(1 - x ** 2 - y ** 2)], axis=-1), poses[:, 3], np.radians(poses[:, 4:])
+
+
+def _posed_env(z, pitch_deg, roll_deg, head_z, dneck_deg, dhead_deg, touching=False):
+    """One env as the probe measured it: projected gravity (-sin pitch, -sin roll, -√(1 - both²)), the head's COM at
+    head_z (body 0), neck_pitch and head_pitch off STAND (0.3491) by these, the body sensor's 13 slots touching or not."""
+    z, gravity, head_z, neck = (torch.tensor(v, dtype=torch.float32)
+                                for v in _rule_inputs([(z, pitch_deg, roll_deg, head_z, dneck_deg, dhead_deg)]))
+    data = SimpleNamespace(root_link_pos_w=torch.cat([torch.zeros(1, 2), z[:, None]], dim=-1), projected_gravity_b=gravity,
+                           body_com_pos_w=torch.cat([torch.zeros(1, 1, 2), head_z[:, None, None]], dim=-1),
+                           joint_pos=STAND + neck, default_joint_pos=torch.full((1, 2), STAND))
+    sensor = SimpleNamespace(data=SimpleNamespace(found=torch.full((1, 13), int(touching))))
+    return SimpleNamespace(num_envs=1, device="cpu", scene={"robot": SimpleNamespace(data=data), tug.BODY_GROUND: sensor})
+
+
+@pytest.mark.parametrize("pose, touching, fires_at", [(WALKER_BACK, False, None), (WALKER_STILL, False, None), (LEANING, False, None),
+    (T17_250, False, 15), (T15_250, False, 15), (T19_250, False, 15), (WALKER_BACK, True, 15),
+    *[(pose, False, 15) for pose in OUT_BY_ONE]])
+def test_the_walking_upright_rule_keeps_the_walker_and_ends_the_bow(pose, touching, fires_at):
+    """The walker walks or stands inside every band, a puller may lean back to 20°; the bowed pullers, a shin on the floor
+    and each band crossed alone go down on the 15th straight step."""
+    env = _posed_env(*pose, touching=touching)
     term = rewards.Down(None, env)
-    fired = [bool(term(env, 0.07, -math.cos(math.radians(45.0)), 15)[0]) for _ in range(20)]
+    fired = [bool(term(env, tug.BODY_GROUND, 15, ENTITY)[0]) for _ in range(20)]
     assert (fired.index(True) + 1 if any(fired) else None) == fires_at
 
 
+def test_one_rule_trains_and_judges():
+    """check.py and Down call one predicate: numpy and torch give the same mask."""
+    poses = np.array([WALKER_BACK, WALKER_STILL, LEANING, T17_250, T15_250, T19_250, *OUT_BY_ONE])
+    inputs = _rule_inputs(poses)
+    numpy_mask = rewards.is_upright(*inputs)
+    torch_mask = rewards.is_upright(*(torch.from_numpy(v) for v in inputs))
+    assert numpy_mask.tolist() == torch_mask.tolist() == [True] * 3 + [False] * (3 + len(OUT_BY_ONE))
+
+
 def test_a_down_count_restarts_on_a_reset():
-    env = _posed_env(0.05, 0.0)
+    env = _posed_env(*T17_250)
     term = rewards.Down(None, env)
-    args = (0.07, -math.cos(math.radians(45.0)), 15)
     for _ in range(14):
-        term(env, *args)
+        term(env, tug.BODY_GROUND, 15, ENTITY)
     term.reset(torch.tensor([0]))
-    assert not term(env, *args)[0]
+    assert not term(env, tug.BODY_GROUND, 15, ENTITY)[0]
 
 
 def test_stay_upright_ends_a_down_duck_and_costs_its_pits():
     cfg = _cfg_with_knobs(stay_upright=1.0)
-    assert "down" in cfg.terminations and "fell" not in cfg.terminations
-    assert cfg.terminations["down"].params == {"min_height_m": 0.07, "gravity_z": pytest.approx(-0.7071068), "hold_steps": 15}
+    down = cfg.terminations["down"]
+    assert down.func is rewards.Down and (down.params["sensor_name"], down.params["hold_steps"]) == ("body_ground_contact", 15)
+    entity = down.params["asset_cfg"]
+    assert (entity.name, tuple(entity.body_names), tuple(entity.joint_names)) == ("robot", ("jaw_soft",), ("neck_pitch", "head_pitch"))
+    sensor = {s.name: s for s in cfg.scene.sensors}["body_ground_contact"]
+    assert (sensor.primary.mode, sensor.primary.pattern, sensor.primary.entity, tuple(sensor.primary.exclude)) == ("body", ".*", "robot", ("ankle_left", "ankle_right"))
+    assert (sensor.secondary.mode, sensor.secondary.pattern, tuple(sensor.fields)) == ("body", "terrain", ("found",))
     assert (cfg.rewards["down"].weight, cfg.rewards["down"].params) == (-50.0, {"terms": ("down",)})
-    assert cfg.rewards["out"].params == {"terms": ("in_pit",)}
+    assert cfg.rewards["out"].params == {"terms": ("in_pit",)} and "fell" not in cfg.terminations
     off = _cfg_with_knobs(stay_upright=0.0)
-    assert "down" not in off.terminations and "down" not in off.rewards and off.rewards["out"].params == {"terms": ("in_pit", "fell")}
+    assert "body_ground_contact" not in {s.name for s in off.scene.sensors} and "down" not in off.terminations
+    assert "down" not in off.rewards and off.rewards["out"].params == {"terms": ("in_pit", "fell")}
     assert _cfg_with_knobs(stay_upright=2.0).rewards["down"].weight == -100.0
+
+
+@pytest.fixture(scope="module")
+def upright_live():
+    """The owner's training env (stay upright 1.0), 2 envs; Task 3 names its opponent."""
+    cfg = _cfg_with_knobs(stay_upright=1.0)
+    cfg.scene.num_envs = 2
+    env = ManagerBasedRlEnv(cfg, device="cpu")
+    env.reset()
+    yield env
+    env.close()
+
+
+def test_down_reads_the_head_the_neck_and_a_body_on_the_course(upright_live):
+    entity = upright_live.termination_manager.get_term_cfg("down").params["asset_cfg"]
+    robot = upright_live.scene["robot"]
+    assert [robot.body_names[i] for i in entity.body_ids] == ["jaw_soft"]
+    assert [robot.joint_names[i] for i in entity.joint_ids] == ["neck_pitch", "head_pitch"]
+    upright_live.reset()
+    upright_live.step(torch.zeros(2, 14))
+    assert ((robot.data.body_com_pos_w[:, entity.body_ids[0], 2] - 0.237).abs() <= 0.015).all()   # STAND: 23.7 cm (probe)
+    sensor = upright_live.scene["body_ground_contact"]
+    assert not sensor.data.found.any()                                  # on its feet: the feet are not watched
+    pose = robot.data.root_link_pose_w.clone()
+    pose[1, 2] = 0.03                                                   # env 1's trunk sunk into the platform
+    robot.write_root_link_pose_to_sim(pose)
+    upright_live.sim.forward()
+    upright_live.step(torch.zeros(2, 14))
+    assert sensor.data.found.any(dim=-1).tolist() == [False, True]
 
 
 def test_the_knobs_are_labelled_for_what_they_do():
@@ -721,12 +794,22 @@ def test_a_reset_clears_the_opponents_memory(live):
     assert not term.last_action[1].any() and not term.prev_joint_vel[1].any() and term.last_action[0].any()
 
 
+def _standing(frames, x=0.6):
+    """(2, frames, 21): both ducks at STAND, trunks 12 cm up at -x and +x, facing each other: west unturned, east
+    turned 180° about z."""
+    trace = np.zeros((2, frames, 21), dtype=np.float32)
+    trace[:, :, 2], trace[:, :, 7:] = 0.12, DEFAULT_POSE
+    trace[0, :, 0], trace[0, :, 3] = -x, 1.0
+    trace[1, :, 0], trace[1, :, 6] = x, 1.0
+    return trace
+
+
 def _bout(seed, loser, how, time_s, west_end=-0.5, east_end=0.4):
     """A bout whose string's ends stand still at these x, the settle's last frame too, the string straight
-    between them. Nothing reads the trunks: their traces are zeros."""
+    between them, both ducks standing."""
     frames = round(time_s * 50)
     string = _straight(np.full(frames, west_end), np.full(frames, east_end))
-    return arena_tug.BoutOutcome(seed, loser, how, time_s, np.zeros((2, frames, 21)), np.zeros((2, 1, 21)),
+    return arena_tug.BoutOutcome(seed, loser, how, time_s, _standing(frames), np.zeros((2, 1, 21)),
                                  string, _straight([west_end], [east_end]))
 
 
@@ -734,7 +817,7 @@ def _pulled_by_a_step_back():
     """2250 frames: the west end from -0.50 (the settle's last frame) back by 8 cm over 1.00 s, then still;
     the east end still at +0.42: the ends 0.92 m apart, 1.00 m from 1 s on, the string straight between them."""
     west = -0.50 - 0.08 * np.minimum(np.arange(1, 2251) / 50, 1.0)
-    return arena_tug.BoutOutcome(1, None, "draw", 45.0, np.zeros((2, 2250, 21)), np.zeros((2, 1, 21)),
+    return arena_tug.BoutOutcome(1, None, "draw", 45.0, _standing(2250), np.zeros((2, 1, 21)),
                                  _straight(west, np.full(2250, 0.42)), _straight([-0.50], [0.42]))
 
 
@@ -748,36 +831,48 @@ def test_a_bout_line_says_how_the_pull_went():
     assert check.pull(held, "west") == "never taut · A backed 0.0 cm by 2 s · marker 0.0 cm to A"
 
 
-def _upright_bout(x=-0.5):
-    """100 frames: A (west) 50 standing (trunk z 0.10), 20 at z 0.05, 30 standing, its trunk at x."""
-    trace = np.zeros((2, 100, 21), dtype=np.float32)
-    trace[:, :, 3] = 1.0
-    trace[0, :, 0] = x
-    trace[0, :, 2] = 0.10
-    trace[0, 50:70, 2] = 0.05
-    return arena_tug.BoutOutcome(1, None, "draw", 2.0, trace, np.zeros((2, 1, 21)), np.zeros((100, arena_tug.STRING_POINTS, 3)),
+def _turn(axis, deg):
+    """The quaternion turning `deg` about the unit `axis`."""
+    half = math.radians(deg) / 2
+    return np.array([math.cos(half), *(math.sin(half) * np.asarray(axis, dtype=np.float64))])
+
+
+def _posed_bout(frames, side, x=0.6):
+    """Both ducks standing at -x and +x, facing each other (_standing); A, on `side`, posed frame by frame from
+    dict(z, pitch_deg, roll_deg, dneck_deg, dhead_deg): its quaternion the yaw (0 west, 180° east), then the pitch (a
+    nose-up rotation is +), then the roll, in the trunk's frame; its joints STAND but neck_pitch and head_pitch."""
+    a, n = ("west", "east").index(side), len(frames)
+    trace, neck = _standing(n, x), [JOINT_NAMES.index(name) for name in ("neck_pitch", "head_pitch")]
+    for k, pose in enumerate(frames):
+        tilt, quat = np.empty(4), np.empty(4)
+        mujoco.mju_mulQuat(tilt, _turn((0, 1, 0), -pose["pitch_deg"]), _turn((1, 0, 0), pose["roll_deg"]))
+        mujoco.mju_mulQuat(quat, _turn((0, 0, 1), 180.0 * a), tilt)
+        trace[a, k, 2], trace[a, k, 3:7] = pose["z"], quat
+        trace[a, k, 7:][neck] += np.radians([pose["dneck_deg"], pose["dhead_deg"]])
+    return arena_tug.BoutOutcome(1, None, "draw", n * 0.02, trace, np.zeros((2, 1, 21)), np.zeros((n, arena_tug.STRING_POINTS, 3)),
                                  np.zeros((1, arena_tug.STRING_POINTS, 3)))
 
 
-def test_a_bout_line_says_how_long_a_was_down():
-    """100 frames: 50 standing (z 0.10), 20 at z 0.05, 30 standing; A's trunk 0.5 m from the pit."""
+WALK = dict(z=0.12, pitch_deg=-1.0, roll_deg=2.0, dneck_deg=8.0, dhead_deg=-1.0)       # the walker backwards
+BOW = dict(z=0.072, pitch_deg=-38.0, roll_deg=-11.0, dneck_deg=-69.0, dhead_deg=-6.0)  # t17-250
+
+
+def test_a_bout_line_says_how_a_walked(arena_model):
     from microduck_challenges.tug_of_war import check
-    assert check.upright(_upright_bout(), "west") == "on its feet 80 % · longest down 0.40 s"
-    assert check.upright(_upright_bout(x=-0.20), "west") == "on its feet 100 % · longest down 0.00 s"   # at the lip: left out
-    tilted = _upright_bout()
-    tilted.trace[0, :, 2] = 0.10
-    tilted.trace[0, 10:15, 4] = 0.5   # qx 0.5: tilted 60°
-    assert check.upright(tilted, "west") == "on its feet 95 % · longest down 0.10 s"
-    tilted.trace[1] = tilted.trace[0]
-    tilted.trace[1, :, 0] *= -1
-    assert check.upright(tilted, "east") == "on its feet 95 % · longest down 0.10 s"
+    for side in ("west", "east"):
+        assert check.posture(_posed_bout([WALK] * 50, side), side, arena_model) == "upright 100 % · longest out 0.00 s · feet only 100 %"
+    assert check.posture(_posed_bout([BOW] * 50, "west"), "west", arena_model).startswith("upright 0 % · longest out 1.00 s · ")
+    dipped = _posed_bout([WALK] * 20 + [BOW] * 15 + [WALK] * 15, "west")
+    assert check.posture(dipped, "west", arena_model).startswith("upright 70 % · longest out 0.30 s · ")
+    assert check.posture(_posed_bout([dict(WALK, z=0.02)] * 50, "west"), "west", arena_model).endswith(" · feet only 0 %")
+    assert check.posture(_posed_bout([BOW] * 50, "west", x=0.20), "west", arena_model) == "upright 100 % · longest out 0.00 s · feet only 100 %"   # at the lip: left out
 
 
-def test_the_summary_counts_who_lost_and_how():
+def test_the_summary_counts_who_lost_and_how(arena_model):
     from microduck_challenges.tug_of_war import check
     results = [("west", _bout(1, 0, "pit", 6.2)), ("east", _bout(2, 0, "pit", 3.0)),
                ("west", _bout(3, 1, "marker", 9.0)), ("east", _bout(4, None, "draw", 1.0))]
-    lines = check.summary(results)
+    lines = check.summary(results, arena_model)
     assert lines[0].startswith("bout 1 · seed 1 · A west · A loses by pit at 6.20 s · ")
     assert lines[1].startswith("bout 2 · seed 2 · A east · B loses by pit at 3.00 s · ")
     assert lines[2].startswith("bout 3 · seed 3 · A west · B loses by marker at 9.00 s · ")

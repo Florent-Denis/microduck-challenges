@@ -4,7 +4,7 @@
 
 Plays bouts between the two (B defaults to the reference duck) on the Arena's own physics
 (arena.tug.run_bout), bout k on seed k, sides swapped after each (A starts on the west platform),
-and prints a line per bout (who lost, how it was pulled and how A stood), then the tally.
+and prints a line per bout (who lost, how A pulled and how it walked), then the tally.
 """
 
 import argparse
@@ -13,30 +13,33 @@ import statistics
 import sys
 from pathlib import Path
 
+import mujoco
 import numpy as np
+from arena.constants import CTRL_DT, DEFAULT_POSE, JOINT_NAMES
+from arena.course import compile_tug, duck_prefix
 from arena.manifest import load_event
 from arena.policy import PolicyError, load_policy
-from arena.constants import CTRL_DT
 from arena.tug import BoutOutcome, marker_x, run_bout
 
 from .env import PIT_M
 from .opponent import REFERENCE
-from .rewards import UPRIGHT_TILT_DEG, UPRIGHT_Z_M
+from .rewards import FEET, HEAD, NECK, is_upright
 
 EVENT = "tug-of-war"
 SIDES = ("west", "east")
 TAUT_M = 0.98  # the ends this far apart: taut; the string goes taut when the other duck stands and resists, and stays short of it when that duck lies down or gives way
 BACKED_S = 2.0  # where A's retreat is read
-LIP_M = 0.08  # A's frames with its trunk this near the pit's lip are left out of the upright reading
+LIP_M = 0.08  # A's frames with its trunk this near the pit's lip are left out of the posture reading
 
 
-def play(manifest, a, b, bouts: int) -> list[tuple[str, BoutOutcome]]:
-    """(A's side, outcome) per bout: bout k on seed k + 1, A west when k is even."""
+def play(manifest, model, a, b, bouts: int) -> list[tuple[str, BoutOutcome]]:
+    """(A's side, outcome) per bout on `model`, the event's tug compiled once: bout k on seed k + 1,
+    A west when k is even."""
     results = []
     for k in range(bouts):
         side = SIDES[k % 2]
         west, east = (a, b) if side == "west" else (b, a)
-        results.append((side, run_bout(manifest, west, east, k + 1)))
+        results.append((side, run_bout(manifest, west, east, k + 1, model=model)))
     return results
 
 
@@ -56,20 +59,50 @@ def pull(outcome: BoutOutcome, side: str) -> str:
     return f"{taut_at} · A backed {round(backed, 1) + 0.0:.1f} cm by {BACKED_S:.0f} s · marker {round(marker, 1) + 0.0:.1f} cm to A"
 
 
-def upright(outcome: BoutOutcome, side: str) -> str:
-    """How A stood: the share of its timed frames upright (trunk at UPRIGHT_Z_M or more, tilt at
-    UPRIGHT_TILT_DEG or less, the tilt read as arena.moments reads it) and its longest straight run
-    down, over the frames whose trunk is more than half the pit and LIP_M from the centre line."""
-    trace = outcome.trace[0 if side == "west" else 1].astype(np.float64)
-    tilt = np.arccos(np.clip(1 - 2 * (trace[:, 4] ** 2 + trace[:, 5] ** 2), -1, 1))
-    standing = (trace[:, 2] >= UPRIGHT_Z_M) & (tilt <= np.radians(UPRIGHT_TILT_DEG))
-    counted = np.abs(trace[:, 0]) > PIT_M / 2 + LIP_M
-    runs = [len(list(run)) for down, run in itertools.groupby(counted & ~standing) if down]
-    share = 100 * (standing & counted).sum() / counted.sum() if counted.any() else 100.0
-    return f"on its feet {share:.0f} % · longest down {max(runs, default=0) * CTRL_DT:.2f} s"
+def _qpos(model, prefix: str) -> list[int]:
+    """A duck's qpos addresses in a trace frame's order: its trunk's free joint, then JOINT_NAMES."""
+    free = model.jnt_qposadr[model.body(prefix + "trunk_base").jntadr[0]]
+    return [*range(free, free + 7), *(model.joint(prefix + name).qposadr[0] for name in JOINT_NAMES)]
 
 
-def summary(results) -> list[str]:
+def posture(outcome: BoutOutcome, side: str, model) -> str:
+    """How A walked, over its frames whose trunk is more than half the pit and LIP_M from the centre
+    line: the share upright (rewards.is_upright, the training's rule, and only its feet on the course),
+    its longest straight run out, and the share with only its feet on the course. Each frame poses
+    both ducks from the trace in `model`, the event's tug, the string left at rest, and recomputes
+    their contacts: the head's height is its centre of mass's, the gravity is the trace quaternion's."""
+    a = SIDES.index(side)
+    prefix, trace = duck_prefix(a), outcome.trace.astype(np.float64)
+    ducks = [_qpos(model, duck_prefix(k)) for k in (0, 1)]
+    head, feet = model.body(prefix + HEAD).id, [model.body(prefix + name).id for name in FEET]
+    body = np.flatnonzero((model.body_rootid[model.geom_bodyid] == model.body(prefix + "trunk_base").id)
+                          & ~np.isin(model.geom_bodyid, feet))
+    course = np.flatnonzero(model.geom_bodyid == model.body("course").id)
+    data = mujoco.MjData(model)
+    frames = trace.shape[1]
+    head_z, feet_only = np.empty(frames), np.empty(frames, dtype=bool)
+    for f in range(frames):
+        for k, qpos in enumerate(ducks):
+            data.qpos[qpos] = trace[k, f]
+        mujoco.mj_fwdPosition(model, data)
+        head_z[f] = data.xipos[head, 2]
+        pairs = data.contact.geom
+        feet_only[f] = not (np.isin(pairs, body) & np.isin(pairs[:, ::-1], course)).any()
+    w, x, y, z = trace[a, :, 3:7].T
+    gravity_b = -np.stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)], axis=-1)
+    neck = [JOINT_NAMES.index(name) for name in NECK]
+    upright = is_upright(trace[a, :, 2], gravity_b, head_z, trace[a, :, 7:][:, neck] - DEFAULT_POSE[neck]) & feet_only
+    counted = np.abs(trace[a, :, 0]) > PIT_M / 2 + LIP_M
+    runs = [len(list(run)) for out, run in itertools.groupby(counted & ~upright) if out]
+
+    def share(kept):
+        return 100 * (kept & counted).sum() / counted.sum() if counted.any() else 100.0
+
+    return (f"upright {share(upright):.0f} % · longest out {max(runs, default=0) * CTRL_DT:.2f} s"
+            f" · feet only {share(feet_only):.0f} %")
+
+
+def summary(results, model) -> list[str]:
     lines = []
     for k, (side, outcome) in enumerate(results, 1):
         if outcome.loser is None:
@@ -79,7 +112,7 @@ def summary(results) -> list[str]:
             verdict = f"{loser} loses by {outcome.how}"
         lines.append(
             f"bout {k} · seed {outcome.seed} · A {side} · {verdict} at {outcome.time_s:.2f} s"
-            f" · {pull(outcome, side)} · {upright(outcome, side)}"
+            f" · {pull(outcome, side)} · {posture(outcome, side, model)}"
         )
     outcomes = [outcome for _, outcome in results]
     decided = [(side, o) for side, o in results if o.loser is not None]
@@ -104,7 +137,9 @@ def main(argv=None) -> int:
     except PolicyError as exc:
         print(exc, file=sys.stderr)
         return 1
-    print("\n".join(summary(play(load_event(EVENT), a, b, args.bouts))))
+    manifest = load_event(EVENT)
+    model = compile_tug(manifest)
+    print("\n".join(summary(play(manifest, model, a, b, args.bouts), model)))
     return 0
 
 

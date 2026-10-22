@@ -1,6 +1,7 @@
 """The Tug of War's own terms: where the learner's string end and the marker are, the new ground the
 marker wins towards the learner, the opponent as the critic reads it, which end of a bout an episode
-met, the Arena's fall rule as a training-only termination and the upright rule that replaces it.
+met, the Arena's fall rule as a training-only termination and the walking-upright rule that replaces
+it, which check.py judges too.
 
 The string is the Arena's rope (env.add_string): its points are the sites p0 (the west end, tied to
 the learner) to p16 (the east end, tied to the opponent), where `arena.tug` records them. The marker
@@ -9,13 +10,26 @@ string end, as pit_margin reads it, is where the Arena ties the string, the base
 trunk's position plus the offset turned by the trunk's quaternion.
 """
 
+import math
+
 import torch
 from mjlab.managers import ManagerTermBase
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_apply
 
 STRING = "string/"  # the string's names, as arena.course.STRING
 MIDDLE = 8  # the point the marker is, as arena.tug.MIDDLE
-UPRIGHT_Z_M, UPRIGHT_TILT_DEG = 0.07, 45.0  # the upright rule's trunk height and tilt (env D22)
+# Walking upright (env D22), the robot's own gait with margin: the trunk's height, its pitch (bowed towards
+# the opponent, then leaning away from it), its roll, the head's centre of mass's height, and how far the
+# neck's joints stray from STAND.
+UPRIGHT_Z_M = 0.10
+UPRIGHT_PITCH_DEG = (-10.0, 20.0)
+UPRIGHT_ROLL_DEG = 10.0
+UPRIGHT_HEAD_Z_M = 0.18
+UPRIGHT_NECK_DEG = 30.0
+HEAD = "jaw_soft"  # the head's body, the end of the neck's chain
+NECK = ("neck_pitch", "head_pitch")
+FEET = ("ankle_left", "ankle_right")  # the bodies of the only geoms allowed on the course
 
 
 def _string_end(data, offset: tuple) -> torch.Tensor:
@@ -108,11 +122,28 @@ class ArenaFall(ManagerTermBase):
         self._tipped_for[env_ids] = 0
 
 
-class Down(ArenaFall):
-    """The upright rule (env D22) as a termination: the learner's trunk below `min_height_m` or its
-    projected gravity's z above `gravity_z` (tilted past an angle) for `hold_steps` straight control
-    steps, out on the step that completes the hold."""
+def is_upright(z, gravity_b, head_z, neck_dev):
+    """Walking upright's bands (env D22), a mask over the leading dims of numpy arrays or torch tensors
+    alike: the trunk `z` m high, its projected gravity `gravity_b` (..., 3), the head's centre of mass
+    `head_z` m high and the NECK joints off STAND, `neck_dev` (..., 2) rad. The pitch is asin(-g_b[0]),
+    + its top leaning away from the opponent it faces; the roll asin(-g_b[1]). Which bodies touch the
+    course is the caller's to add."""
+    pitch = -gravity_b[..., 0]
+    low, high = (math.sin(math.radians(deg)) for deg in UPRIGHT_PITCH_DEG)
+    return ((z >= UPRIGHT_Z_M) & (pitch >= low) & (pitch <= high)
+            & (abs(gravity_b[..., 1]) <= math.sin(math.radians(UPRIGHT_ROLL_DEG))) & (head_z >= UPRIGHT_HEAD_Z_M)
+            & (abs(neck_dev) <= math.radians(UPRIGHT_NECK_DEG)).all(-1))
 
-    def __call__(self, env, min_height_m: float, gravity_z: float, hold_steps: int) -> torch.Tensor:
-        data = env.scene["robot"].data
-        return self._held((data.root_link_pos_w[:, 2] < min_height_m) | (data.projected_gravity_b[:, 2] > gravity_z), hold_steps)
+
+class Down(ArenaFall):
+    """Walking upright (env D22) as a termination: the learner out of is_upright (its head, asset_cfg's
+    body, and its neck, asset_cfg's joints off their defaults), or any body the `sensor_name` sensor
+    watches (all but FEET) on the course, for `hold_steps` straight control steps, out on the step that
+    completes the hold."""
+
+    def __call__(self, env, sensor_name: str, hold_steps: int, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+        data, joints = env.scene[asset_cfg.name].data, asset_cfg.joint_ids
+        upright = is_upright(data.root_link_pos_w[:, 2], data.projected_gravity_b,
+                             data.body_com_pos_w[:, asset_cfg.body_ids[0], 2],
+                             data.joint_pos[:, joints] - data.default_joint_pos[:, joints])
+        return self._held(~upright | env.scene[sensor_name].data.found.any(dim=-1), hold_steps)

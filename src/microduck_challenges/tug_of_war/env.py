@@ -89,15 +89,22 @@ decisions, each commented where it is made:
       the ends the ducks' resets drew. A straight 1.00 m string overshoots ends closer than
       1 m by (1 - gap) / 2 at each end, at most 2 cm, and the ties take it in on the first steps
       (Plan H Task 4's probe watches them for NaN)
-  D22 stay_upright, a knob (challenge.toml): 0, what users get, lets a duck crouch, sit or lie as
-      the Arena allows and keeps D9's fall; above 0, `down` replaces `fell`: the learner's trunk
-      under UPRIGHT_Z_M (7 cm) or tilted past UPRIGHT_TILT_DEG (45°) for FALL_HOLD_S ends the
-      training episode and costs that many pits (-50 each, `down`). The numbers, measured on the
-      robot (owner, 2026-10-21): standing, the trunk stands 11-12 cm; a sweep of poses with only
-      the feet on the floor keeps it at 7.8 cm or more leaning back to 45°, so a puller may
-      lean; t10-500 sat low, 4.5 cm and tilted 57°, its legs carrying it (no trunk-floor contact); a lying duck sits at
-      3.6 cm. A tilt past 60° held 0.3 s is past 45° first, so `fell` has nothing left to
-      catch. The owner's ducks train with it on; check.py reads how long A was down
+  D22 stay_upright, a knob (challenge.toml): 0, what users get, lets a duck crouch, sit, lie or
+      plant its head, as the Arena allows, and keeps D9's fall. Above 0, `down` replaces `fell`:
+      the learner out of the walking-upright bands (rewards.is_upright: the trunk UPRIGHT_Z_M up
+      or more, pitched within UPRIGHT_PITCH_DEG, rolled UPRIGHT_ROLL_DEG at most, the head's
+      centre of mass UPRIGHT_HEAD_Z_M up or more, the NECK joints within UPRIGHT_NECK_DEG of
+      STAND), or any body but its feet on the course (the BODY_GROUND sensor), for FALL_HOLD_S
+      ends the training episode and costs that many pits (-50 each, `down`). The bands are the
+      walker's envelope with margin: BEST_alpha_walking over six runs held the trunk at
+      11.0–12.4 cm, pitch -2.7..+2.1°, roll 4.7° at most, head 22.6–24.1 cm, neck -4.7..+11°,
+      head pitch -8.3..+5°, only the feet down. The 20° of leaning back is sized for a ~2.5 N
+      string held at the 15 cm tie, a physics estimate. The bow it ends (t15-250, t17-250 and
+      t19-250, probe 2026-10-22): trunk 7–8 cm, pitched 33–44° towards the opponent, neck
+      50–85° down, head on the floor in 77–83 % of frames. Why the sensor: posed at random
+      within every band, a shin touched the floor in 2.2 % of 200,000 poses, the trunk at
+      10.0–11.1 cm with a foot down. The owner's ducks train with it on (owner, 2026-10-22);
+      check.py reads the same rule
 """
 
 import math
@@ -136,10 +143,11 @@ from mjlab_microduck.tasks.symmetry import PpoWithSymmetryCfg
 
 from .opponent import OpponentActionCfg
 from .rewards import (
+    FEET,
+    HEAD,
     MIDDLE,
+    NECK,
     STRING,
-    UPRIGHT_TILT_DEG,
-    UPRIGHT_Z_M,
     ArenaFall,
     Down,
     MarkerGround,
@@ -179,6 +187,7 @@ STRING_TIE_SOLIMP = (0.9, 0.95, 0.001, 0.5, 2.0)           # MuJoCo's default, a
 STRING_FRICTION = (1.0, 0.005, 0.0001)
 
 TILE_M = 2.0  # the longest a course tile is along x or y (D18)
+BODY_GROUND = "body_ground_contact"  # the learner's bodies but its feet on the course (D22)
 
 ROBOT = "robot/"  # the prefix mjlab attaches the learner entity under
 OPPONENT = "opponent/"  # and the opponent's
@@ -570,7 +579,7 @@ def make_env_cfg(
     cfg.rewards["upright"].params["asset_cfg"].body_names = ("trunk_base",)
     # upright: std 0.5, far looser than the sprint's √0.05. Leaning back is how a
     # duck holds a pull, so a lean must stay cheap; the training's fall
-    # termination (ArenaFall, below) is the hard line.
+    # termination (ArenaFall, or `down` with stay_upright, below) is the hard line.
     cfg.rewards["upright"].weight = knobs["upright_reward"]
     cfg.rewards["upright"].params["std"] = 0.5
 
@@ -704,13 +713,22 @@ def make_env_cfg(
     # TRAINING ONLY (D9, D22): going down ends a training episode so the duck
     # keeps learning to stand and pull; the Arena judges only the pit. The
     # Arena's fall rule (gravity z above FALL_GRAVITY_Z for FALL_HOLD_S of
-    # straight control steps), or, with stay_upright, the upright rule (D22).
+    # straight control steps), or, with stay_upright, walking upright (D22): its
+    # bands, read off the head and the neck, and no body but the feet on the course.
     hold_steps = round(FALL_HOLD_S / ctrl_dt)
     if stay_upright:
+        cfg.scene.sensors += (ContactSensorCfg(
+            name=BODY_GROUND,
+            primary=ContactMatch(mode="body", pattern=".*", entity="robot", exclude=FEET),
+            secondary=ContactMatch(mode="body", pattern="terrain"),
+            fields=("found",),
+            reduce="none",
+            num_slots=1,
+        ),)
         cfg.terminations["down"] = TerminationTermCfg(
             func=Down,
-            params={"min_height_m": UPRIGHT_Z_M, "gravity_z": -math.cos(math.radians(UPRIGHT_TILT_DEG)),
-                    "hold_steps": hold_steps},
+            params={"sensor_name": BODY_GROUND, "hold_steps": hold_steps,
+                    "asset_cfg": SceneEntityCfg("robot", body_names=(HEAD,), joint_names=NECK)},
         )
     else:
         cfg.terminations["fell"] = TerminationTermCfg(

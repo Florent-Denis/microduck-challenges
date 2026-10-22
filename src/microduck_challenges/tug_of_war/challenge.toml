@@ -31,9 +31,10 @@ value = 1.0
 min   = 0.0
 max   = 4.0
 
-# 0 lets the duck crouch, sit or lie as the Arena allows; above 0, going down (trunk
-# under 7 cm or tilted past 45° for 0.3 s) ends the training episode and costs that
-# many pits.
+# 0 lets the duck crouch, sit, lie or plant its head as the Arena allows; above 0 it must
+# walk upright: trunk 10 cm up or more, pitched 10° forward to 20° back, rolled 10° at most,
+# its head 18 cm up or more, neck and head within 30° of standing, only its feet on the
+# course. Out of that for 0.3 s ends the training episode and costs that many pits.
 [params.stay_upright]
 label = "Stay upright"
 value = 0.0
