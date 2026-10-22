@@ -8,8 +8,6 @@ saw, so both ducks act on one state, as in the Arena's `runner._step`. It builds
 `runner._observe` gives a duck and sets the opponent's joint targets as the learner's are set, into
 its own BAM servos.
 `ReferenceActor`, the learner's actor in RL_CFG, starts it as the same duck (Plan F, lever 5).
-The opponent is the reference duck unless a training names another file beside it
-(`--env.actions.opponent.onnx walker.onnx`).
 The HF job installs no Arena: nothing here imports it; tests/test_tug_of_war.py pins each copy.
 """
 
@@ -24,7 +22,6 @@ from onnx import helper, numpy_helper
 from rsl_rl.models import MLPModel
 
 REFERENCE = Path(__file__).with_name("reference.onnx")  # the Arena's reference duck, t20-500, walking upright (Plan I)
-WALKER = Path(__file__).with_name("walker.onnx")  # the Arena's BEST_alpha_walking, its golden walker
 REFERENCE_SEEN = 1003 * 24 * 4096  # t20-500's normalizer count: rollouts (its walker start's 502, its own 501) × steps × envs
 WARM_START_STD = 0.5  # the warm-started learner's action noise: t20-500's own at 500, 0.36 to 0.70, mean 0.50, it walked upright under
 
@@ -79,17 +76,15 @@ class ReferenceActor(MLPModel):
     """The learner's actor (RL_CFG's), starting as the reference duck (`--agent.actor.class-name
     MLPModel` starts from scratch instead).
 
-    Its layers and its observation normalizer are `onnx`'s, `reference.onnx` (a shape or a missing
+    Its layers and its observation normalizer are `reference.onnx`'s (a shape or a missing
     normalizer refuses to load), its action noise std is WARM_START_STD; the critic starts fresh.
     The ONNX's std carries the normalizer's epsilon. The normalizer counts the observations t20-500
     had read: from 0, PPO's first update would replace its statistics with one batch's.
     """
 
-    onnx: Path = REFERENCE
-
     def __init__(self, *args, distribution_cfg: dict, **kwargs):
         super().__init__(*args, distribution_cfg={**distribution_cfg, "init_std": WARM_START_STD}, **kwargs)
-        normalize, *layers = load_actor(self.onnx)
+        normalize, *layers = load_actor(REFERENCE)
         self.mlp.load_state_dict(torch.nn.Sequential(*layers).state_dict())
         std = normalize.std - self.obs_normalizer.eps
         self.obs_normalizer.load_state_dict(
@@ -97,28 +92,13 @@ class ReferenceActor(MLPModel):
         )
 
 
-class WalkerActor(ReferenceActor):
-    """The learner's actor starting as `walker.onnx` (`--agent.actor.class-name
-    microduck_challenges.tug_of_war.opponent:WalkerActor`).
-
-    It starts as BEST_alpha_walking, the Arena's golden walker and the only policy found walking
-    backwards: it stands still for |vx| <= 0.2 and at the tug's -0.30, and walks back at -0.40.
-    Its normalizer count is the reference's. Its own is unknown; what matters is that PPO's first
-    update does not replace its statistics with one batch's, and that is the inertia t15-t17
-    warm-started with. Its noise std is WARM_START_STD.
-    """
-
-    onnx = WALKER
-
-
 @dataclass(kw_only=True)
 class OpponentActionCfg(JointPositionActionCfg):
-    """The opponent's servos, driven by the ONNX beside this module named `onnx` on the event's `command` (env.COMMAND)."""
+    """The opponent's servos, driven by `reference.onnx` on the event's `command` (env.COMMAND)."""
 
     entity_name: str = "opponent"
     actuator_names: tuple[str, ...] = (".*",)
     command: tuple[float, ...]
-    onnx: str = "reference.onnx"
 
     def build(self, env) -> "OpponentAction":
         return OpponentAction(self, env)
@@ -135,7 +115,7 @@ class OpponentAction(JointPositionAction):
 
     def __init__(self, cfg: OpponentActionCfg, env):
         super().__init__(cfg=cfg, env=env)
-        self.policy = load_actor(Path(__file__).with_name(cfg.onnx)).to(self.device).eval()
+        self.policy = load_actor(REFERENCE).to(self.device).eval()
         self._command = torch.tensor(cfg.command, device=self.device).expand(self.num_envs, -1)
         # The parent sized its raw action by action_dim, 0: the opponent's is its policy's, (n, 14).
         self._raw_actions = torch.zeros(self.num_envs, self._num_targets, device=self.device)
