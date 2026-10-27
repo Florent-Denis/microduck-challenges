@@ -1,9 +1,9 @@
-"""Which of two Tug of War policies pulls the other off the platform?
+"""Which of two Tug of War policies drags the other into the pit?
 
     uv run --frozen --group workshop python -m microduck_challenges.tug_of_war.check A.onnx [B.onnx] [--bouts 10]
 
 Plays bouts between the two (B defaults to the reference duck) on the Arena's own physics
-(arena.tug.run_bout), bout k on seed k, sides swapped after each (A starts on the west platform),
+(arena.tug.run_bout), bout k on seed k, sides swapped after each (A starts on the west side),
 and prints a line per bout (who lost, how A pulled and how it walked), then the tally.
 """
 

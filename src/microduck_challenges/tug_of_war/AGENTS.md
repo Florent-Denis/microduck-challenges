@@ -32,14 +32,22 @@ backwards. The rules, from `arena/events/tug-of-war.toml` in the installed Arena
   falls, sits or lies down stays in play and can still be dragged in. If neither is in the pit by
   the time limit (**45 s**), or both go in on one step, the marker decides: the string's middle
   point, pulled towards one side, that side's duck wins.
+- **A fault** loses the bout at once: a duck that gives no valid action, an action that is not a
+  number (NaN), a policy that fails to answer, an answer longer than 1 s, or more thinking over the
+  bout, settle included, than its 45 s. Both at once: nobody wins it. A step MuJoCo has to reset
+  ends the bout for nobody.
 - **The rating**: five bouts against the Arena's **reference duck** (`reference.onnx` here, t20-500,
   which walks backwards upright, as the robot walks, on this ring and string), the entry west on odd
   seeds. A bout scores the centimetres of ground the marker ends from the centre line towards the
   entry, plus **100 cm** when only the opponent is in the pit (minus 100 when only the entry is). The
-  rating is the mean of the five, **in centimetres, higher wins**. `arena score` prints it. Against
+  rating is the mean of the five, **in centimetres, higher wins**. A fault scores **-200 cm**, and in
+  a rating a MuJoCo reset is the entry's fault too (the reference never causes one). `arena score`
+  prints the rating, a faulted bout as `fault`. Against
   it, the ducks that pull bowed onto their heads rate about +135 cm, the recipe as shipped +138.1 cm
   after 250 iterations, and the reference itself +3.7 cm ("What is known").
-- **The weekly cup**: every entry plays it, bout against bout; the rating ranks the board.
+- **The weekly cup**: each player's latest entry plays it, bout against bout; the rating ranks the
+  board and breaks a match left level. Entries close on Friday at 16:00, Paris time, and the cup airs
+  at 18:00; it needs at least 4 entrants.
 
 ## The policy
 
@@ -497,6 +505,7 @@ down" below are that rule's, which `check.py` no longer prints.
 - Player points: +100 for a first publication in a challenge, +10 per publication (the first 3 per
   UTC day, all challenges together), +25 once per challenge for improving a personal best,
   +250/+150/+100 while holding first/second/third place. Podium points move with the rank; a
-  withdrawn run loses its points.
+  withdrawn run loses its points. A weekly cup pays +250 to its champion, +150 to its finalist and
+  +100 to each semi-finalist once its final has aired.
 - The challenge's page on the Arena has the same rules in plain words, and the **Train my own robot**
   button that opens the workshop.
