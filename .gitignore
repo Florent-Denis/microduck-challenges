@@ -6,3 +6,4 @@ publish-*/
 wandb/
 *.onnx
 !src/microduck_challenges/tug_of_war/reference.onnx
+.claude/settings.local.json
